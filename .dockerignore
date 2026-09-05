@@ -1,0 +1,35 @@
+# Das Dockerfile im Root macht `COPY . .` — ohne diese Liste landet alles im Image,
+# auch Geheimnisse und hunderte Megabyte, die dort nichts zu suchen haben.
+#
+# config/ ist ausdrücklich NICHT ausgeschlossen: seit der Bind-Mount weg ist, ist das
+# Image die einzige Quelle der Konfiguration.
+
+# Geheimnisse
+.env
+.env.*
+!.env.example
+
+# Echte Finanzdaten (siehe .gitignore)
+account_transactions.csv
+*_transactions.csv
+all_events.json
+events_with_documents.json
+other_events.json
+
+# Laufzeitdaten — kommen über das state-Volume, nicht über das Image
+state/
+
+# Frontend: eigenes Image, eigener Build-Kontext
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# Werkzeuge und Zwischenstände
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/

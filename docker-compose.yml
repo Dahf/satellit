@@ -21,8 +21,13 @@ services:
       - DASHBOARD_URL=${DASHBOARD_URL:-https://${DASHBOARD_HOST:-satellit.silasbeckmann.de}}
       - STOOQ_APIKEY=${STOOQ_APIKEY:-}
     volumes:
-      - ./state:/app/state      # Journal, Kurs-Cache, Berichte, Ampel-Historie
-      - ./config:/app/config    # settings.yaml, exclusions.yaml, symbol_overrides.yaml
+      # Nur die Daten werden gemountet. config/ kommt bewusst aus dem Image:
+      # Ein Bind-Mount darüber hat zweimal eine veraltete Fassung über die richtige gelegt
+      # (fehlende settings.yaml, dann fehlender ETF-Katalog und wirkungslose Ausschlüsse) —
+      # ohne dass es irgendwo auffiel. Die Konfiguration liegt im Git und wird mitgebaut;
+      # eine Änderung braucht damit Commit und Rebuild, ist dafür aber immer synchron
+      # zum Code, der sie liest.
+      - ./state:/app/state      # Journal, Kurs-Cache, Berichte, Ampel-Historie, Kassenbuch
     expose:
       - "8787"                  # Dashboard-API, nur im internen Netz
     command: ["serve"]          # Scheduler (Samstag 08:00) + API
