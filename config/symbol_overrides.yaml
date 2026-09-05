@@ -1,0 +1,6 @@
+# Manuelle Korrekturen der Ticker-Zuordnung (ISIN -> Yahoo-Symbol).
+# Der Bericht listet Symbole, für die keine Kurse geladen werden konnten;
+# hier die richtige Schreibweise eintragen.
+overrides: {}
+#  GB0007980591: "BP.L"
+#  SE0000108656: "ERIC-B.ST"

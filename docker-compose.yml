@@ -1,0 +1,13 @@
+services:
+  satellit:
+    build: .
+    image: satellit:latest
+    container_name: satellit
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Berlin
+    volumes:
+      - ./state:/app/state      # Journal, Kurs-Cache, Berichte, Ampel-Historie
+      - ./config:/app/config    # settings.yaml, exclusions.yaml, symbol_overrides.yaml
+    command: ["serve"]          # Scheduler: Samstag 08:00 Europe/Berlin

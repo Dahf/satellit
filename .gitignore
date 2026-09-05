@@ -1,0 +1,11 @@
+.env
+state/prices/
+state/reports/
+state/regime/
+state/universe/*.csv
+state/theses/
+state/*.json
+state/*.csv
+__pycache__/
+*.pyc
+.pytest_cache/

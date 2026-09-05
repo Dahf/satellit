@@ -1,0 +1,103 @@
+# Parameter des Regelwerks — Spiegel von docs/TRADING_PLAN.md, Anhang A.
+# Weichen Dokument und Datei voneinander ab, gilt das Dokument.
+# Änderungen nur nach Abschnitt 12 des Trading-Plans (Monats-/Jahresreview, Changelog).
+
+portfolio:
+  core_share: 0.90
+  satellite_share: 0.10
+  satellite_band_low: 0.07      # unter 7 %  -> im Januar auffüllen (nur ohne Kill-Switch)
+  satellite_band_high: 0.15     # über 15 %  -> Überschuss in den Kern
+
+universe:
+  regions:
+    US:
+      name: "S&P 500"
+      currency: USD
+      # iShares Core S&P 500 UCITS ETF (SXR8) — deutsche iShares-Seite liefert ISIN + Börse.
+      # Link auf der Produktseite: "Positionen herunterladen" (CSV). Bei Änderung hier eintragen.
+      ishares_url: "https://www.ishares.com/de/privatanleger/de/produkte/253743/ishares-sp-500-b-ucits-etf-acc-fund/1478358465952.ajax?fileType=csv&fileName=SXR8_holdings&dataType=fund"
+      local_file: "state/universe/SXR8_holdings.csv"   # Fallback: manuell heruntergeladene Datei
+      index_symbol: "^GSPC"
+      yahoo_suffix_default: ""
+    EU:
+      name: "STOXX Europe 600"
+      currency: EUR
+      # iShares STOXX Europe 600 UCITS ETF (DE) (EXSA)
+      ishares_url: "https://www.ishares.com/de/privatanleger/de/produkte/251931/ishares-stoxx-europe-600-ucits-etf-de-fund/1478358465952.ajax?fileType=csv&fileName=EXSA_holdings&dataType=fund"
+      local_file: "state/universe/EXSA_holdings.csv"
+      index_symbol: "EXSA.DE"      # Index-Proxy für die EU-Ampel (ETF-Kurs, in EUR)
+      yahoo_suffix_default: null   # wird aus der Börse abgeleitet
+  refresh_days: 30                 # Konstituenten monatlich neu laden
+  min_avg_turnover: 5000000        # Ø Tagesumsatz 20 T in Handelswährung
+  max_price_pct_of_target: 0.40    # Stückpreis <= 40 % der Zielposition
+  max_atr_pct: 0.06                # ATR(20)/Kurs <= 6 %
+  min_history_days: 260
+
+data:
+  primary: yfinance                # yfinance | stooq | fixture
+  fallback: stooq
+  cache_dir: state/prices
+  history_days: 420                # Erstbefüllung
+  batch_size: 80                   # Ticker je yfinance-Download
+  batch_pause_seconds: 3
+  max_stale_days: 5                # älter -> Warnung im Bericht
+  fixture_dir: null                # nur für Tests/Demo
+
+signal:
+  sma_fast: 50
+  sma_slow: 200
+  rs_lookbacks: [126, 252]
+  rs_skip: 21
+  rs_top_fraction: 0.10
+  breakout_weeks: 20
+  max_extension: 0.05
+  max_new_entries:
+    GREEN: 2
+    YELLOW: 1
+    RED: 0
+  watchlist_below_breakout: 0.03   # Top-RS-Titel bis 3 % unter Ausbruch -> Watchlist
+
+risk:
+  risk_pct: 1.0
+  risk_pct_start: 0.5
+  start_trades: 20
+  max_position_pct: 25
+  max_positions: 5
+  max_per_sector: 2
+  max_open_risk_pct: 5.0
+  atr_period: 20
+  atr_stop_mult: 3.0
+  soft_exit_weeks: 10
+  yellow_risk_factor: 0.5
+
+regime:
+  us:
+    green_min: 60
+    yellow_min: 40
+    veto_below: 40
+    hysteresis_weeks: 2
+  eu:
+    green_p200: 0.55
+    red_p200: 0.40
+    red_p50: 0.40
+    hysteresis_weeks: 2
+
+kill_switch:
+  max_drawdown: 0.25
+  min_trades: 30
+
+schedule:
+  weekday: 5          # 0=Montag ... 5=Samstag
+  hour: 8
+  minute: 0
+  timezone: Europe/Berlin
+
+paths:
+  state_dir: state
+  theses_dir: state/theses
+  reports_dir: state/reports
+  regime_dir: state/regime
+  universe_dir: state/universe
+  exclusions_file: config/exclusions.yaml
+  symbol_overrides_file: config/symbol_overrides.yaml
+  vendor_skills_dir: vendor/claude-trading-skills/skills

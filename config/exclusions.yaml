@@ -1,0 +1,11 @@
+# Titel, die der Screener ausblendet.
+# - core_holdings: ISINs der Kern-Aktien (Regel 3.5: kein Doppelhalten)
+# - not_tradable: ISINs, die bei Trade Republic nicht handelbar sind
+# - manual: sonstige Ausschlüsse mit Begründung
+core_holdings: []
+#  - isin: DE0007164600
+#    note: "SAP — Kern-Aktie seit 2026-10"
+not_tradable: []
+#  - isin: CH0012221716
+#    note: "bei TR nicht handelbar (Stand 2026-09)"
+manual: []
