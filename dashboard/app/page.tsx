@@ -2,6 +2,9 @@ import { getLaufstatus, getView, VERDIKT } from "@/lib/view";
 import type { Entscheidung, View } from "@/lib/view";
 import { EntscheidungZeile } from "@/components/entscheidung-zeile";
 import { Einstellungen } from "@/components/einstellungen";
+import { Kopfzahlen } from "@/components/kopfzahlen";
+import { Aufteilung } from "@/components/aufteilung";
+import { Onboarding } from "@/components/onboarding";
 import { cn, dateDe, eur, fmt, pct } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -11,6 +14,7 @@ export default function Seite() {
   const status = getLaufstatus();
 
   if (!v) return <NochKeineDaten status={status} />;
+  if (v.onboarding_noetig) return <Onboarding etfs={v.etf_katalog ?? []} />;
 
   const zuTun = v.entscheidungen.filter((d) => d.dringlichkeit >= 1);
   const ruhig = v.entscheidungen.filter((d) => d.dringlichkeit === 0);
@@ -18,6 +22,8 @@ export default function Seite() {
   return (
     <div className="mx-auto max-w-3xl px-5 pb-24 pt-10 md:px-8">
       <Kopf v={v} anzahl={zuTun.length} />
+      <Kopfzahlen v={v} />
+      <Aufteilung v={v} />
       <Lage v={v} />
 
       <section aria-labelledby="zu-tun" className="mt-10">

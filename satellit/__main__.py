@@ -64,31 +64,22 @@ def cmd_weekly(a, s: Settings) -> int:
 def cmd_portfolio(a, s: Settings) -> int:
     """Kern-Portfolio anzeigen oder einrichten."""
     if a.unterbefehl == "setup":
-        plan = portfolio.lade_plan(s)
-        if plan.onboarding_erledigt and not a.force:
-            print("Portfolio ist bereits eingerichtet. Mit --force überschreiben.")
+        # Bewusst dieselbe Funktion wie das Dashboard: zwei Einrichtungswege, die
+        # unterschiedlich viel tun, sind eine Fehlerquelle, die niemand bemerkt.
+        from .api import action_portfolio_setup
+        try:
+            r = action_portfolio_setup(s, {"start_eur": a.start, "rate_eur": a.rate,
+                                           "sparplan_tag": a.sparplan_tag, "etf_isin": a.etf,
+                                           "etf_anteil": a.etf_anteil, "force": a.force})
+        except ValueError as exc:
+            print(f"Einrichtung nicht möglich: {exc}")
+            if "ISIN" in str(exc):
+                for e in portfolio.lade_etf_katalog(s):
+                    print(f"  {e['isin']}  {e['name']}")
             return 1
-        katalog = {e["isin"]: e for e in portfolio.lade_etf_katalog(s)}
-        etf = katalog.get(a.etf)
-        if etf is None:
-            print(f"ETF {a.etf} nicht im Katalog. Bekannt:")
-            for e in katalog.values():
-                print(f"  {e['isin']}  {e['name']}")
-            return 1
-        kern = round(a.start * float(s.get("portfolio.core_share", 0.90)), 2)
-        plan = portfolio.Plan(
-            start_datum=date.today().isoformat(), monatsrate_eur=float(a.rate),
-            sparplan_tag=int(a.sparplan_tag),
-            etf={"isin": etf["isin"], "symbol": etf["symbol"], "name": etf["name"],
-                 "anteil_kern": float(a.etf_anteil)},
-            startbetrag={"modus": "einmalkauf", "kern_eur": kern,
-                         "satellit_eur": round(a.start - kern, 2),
-                         "ersteinstieg_aktien_offen": float(a.etf_anteil) < 1.0},
-            onboarding_erledigt=True,
-        )
-        portfolio.speichere_plan(s, plan)
-        n = portfolio.schreibe_buchungen(s, portfolio.startbetrag_buchungen(plan, date.today()))
-        print(f"Eingerichtet: {etf['name']}, Rate {a.rate} EUR/Monat, {n} Eröffnungsbuchungen.")
+        print(f"Eingerichtet: {r['etf']} · Kern {dec.zahl(r['kern_eur'])} EUR · "
+              f"Satellit {dec.zahl(r['satellit_eur'])} EUR · {r['buchungen']} Eröffnungsbuchungen")
+        print(f"Trockenlauf bis {r['trockenlauf_bis']} — bis dahin nur mitlesen (Trading-Plan 10.1).")
         return 0
 
     z = portfolio.zusammenfassung(s)
@@ -101,8 +92,11 @@ def cmd_portfolio(a, s: Settings) -> int:
     print(f"  Kern       {e(w.kern_eur)}  ({dec.prozent(w.kern_pct)})")
     print(f"    ETF      {e(w.kern_etf_eur)}")
     print(f"    Aktien   {e(w.kern_aktien_eur)}  (+ {dec.zahl(w.kern_aktien_cash_eur)} EUR Cash bereit)")
-    print(f"  Satellit   {e(w.satellit_eur)}  ({dec.prozent(w.satellit_pct)})")
-    print(f"  Cash       {e(w.cash_eur)}")
+    # Der Kern trägt sein Cash schon in kern_eur; beim Satelliten muss es dazu, sonst
+    # steht eine 0 neben einem Anteil von 10 %.
+    sat_gesamt = w.satellit_eur + w.cash_je_topf.get("satellit", 0.0)
+    print(f"  Satellit   {e(sat_gesamt)}  ({dec.prozent(w.satellit_pct)})")
+    print(f"  Frei       {e(w.cash_je_topf.get('cash', 0.0))}")
     g = z["gewinn"]
     print(f"\nEingezahlt   {e(g['eingezahlt_netto_eur'])}")
     print(f"Gewinn       {e(g['gewinn_eur'])}"
@@ -141,6 +135,37 @@ def cmd_ledger(a, s: Settings) -> int:
               + f"  {b.symbol or b.isin:12} {b.notiz[:30]:30} [{b.quelle_id}]")
     print(f"\n{len(buchungen)} Buchungen · Cash je Topf: "
           + ", ".join(f"{k} {dec.zahl(v)}" for k, v in portfolio.cash_je_topf(buchungen).items()))
+    return 0
+
+
+def cmd_tr_import(a, s: Settings) -> int:
+    """Umsatzliste aus Trade Republic übernehmen — erst zeigen, dann buchen."""
+    from . import tr_import
+
+    pfad = Path(a.datei)
+    if not pfad.exists():
+        print(f"Datei nicht gefunden: {pfad}")
+        return 1
+    text = pfad.read_text(encoding="utf-8", errors="replace")
+    try:
+        v = tr_import.vorschau(s, text)
+    except ValueError as exc:
+        print(f"Nicht lesbar: {exc}")
+        return 1
+    print(f"{v['gelesen']} Zeilen gelesen · {v['neu']} neu · {v['bereits_gebucht']} schon gebucht")
+    if v["zeitraum"][0]:
+        print(f"Zeitraum: {v['zeitraum'][0]} bis {v['zeitraum'][1]}")
+    for typ, n in sorted(v["nach_typ"].items()):
+        print(f"  {n:4}x {typ}")
+    for w in v["warnungen"]:
+        print(f"  ⚠️ {w}")
+    if a.vorschau:
+        print("\nNur Vorschau — ohne --vorschau wird gebucht.")
+        return 0
+    if not v["neu"]:
+        return 0
+    r = tr_import.uebernehmen(s, text)
+    print(f"\n{r['gebucht']} Buchungen übernommen.")
     return 0
 
 
@@ -389,6 +414,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--sparplan-tag", dest="sparplan_tag", type=int, default=1)
     setup.add_argument("--force", action="store_true")
     pf_.set_defaults(func=cmd_portfolio, unterbefehl="show")
+
+    tr = sub.add_parser("tr-import", help="Umsatzliste aus Trade Republic übernehmen (pytr-CSV)")
+    tr.add_argument("datei")
+    tr.add_argument("--vorschau", action="store_true", help="nur zeigen, nichts buchen")
+    tr.set_defaults(func=cmd_tr_import)
 
     lg = sub.add_parser("ledger", help="Kassenbuch anzeigen/ergänzen")
     lgs = lg.add_subparsers(dest="unterbefehl")

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from satellit import portfolio as pf  # noqa: E402
-from satellit import journal  # noqa: E402
+from satellit import journal, tr_import  # noqa: E402
 from satellit.config import Settings, load_settings  # noqa: E402
 
 
@@ -385,6 +385,78 @@ class TestPlanIO(unittest.TestCase):
             for feld in ("isin", "symbol", "name", "ter", "ertrag", "gruppe"):
                 self.assertIn(feld, e, f"{e.get('name')}: {feld} fehlt")
         self.assertTrue(any(e["isin"] == "IE00BK5BQT80" for e in katalog))
+
+
+TR_CSV = """Date;Type;Value;ISIN;Note;Shares;Fee
+2026-09-06;Deposit;5000,00;;Überweisung;;
+2026-09-07;Savings plan;-450,00;IE00BK5BQT80;Vanguard FTSE All-World;2,6779;0,00
+2026-10-01;Savings plan;-450,00;IE00BK5BQT80;Vanguard FTSE All-World;2,5411;0,00
+2026-10-07;Buy;-2178,40;US0378331005;Apple Inc;12;1,00
+2026-11-02;Dividend;12,50;US0378331005;Apple Dividende;;
+2026-11-03;Kaffeekasse;-3,50;;Was auch immer;;
+2026-11-04;Sell;900,00;US0378331005;Apple Inc;5;1,00
+;;;;;;
+"""
+
+
+class TestTrImport(unittest.TestCase):
+    """Die pytr-CSV ist ein undokumentiertes Fremdformat — der Parser muss misstrauisch sein."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = einstellungen(self.tmp.name)
+        plan = pf.Plan(etf={"isin": "IE00BK5BQT80", "symbol": "VWCE.DE", "anteil_kern": 0.8},
+                       onboarding_erledigt=True)
+        pf.speichere_plan(self.s, plan)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_zuordnung_und_unbekanntes(self):
+        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV, pf.lade_plan(self.s))
+        nach_typ = {b.typ for b in buchungen}
+        self.assertIn("einzahlung", nach_typ)
+        self.assertIn("sparplan", nach_typ)           # ETF-ISIN -> Kern
+        self.assertIn("satellit_kauf", nach_typ)      # fremde ISIN -> Satellit
+        self.assertIn("satellit_verkauf", nach_typ)
+        self.assertIn("dividende", nach_typ)
+        # Unbekannte Art wird gemeldet, nicht geraten.
+        self.assertTrue(any("Kaffeekasse" in w for w in warnungen), warnungen)
+        self.assertNotIn("kaffeekasse", {b.typ for b in buchungen})
+
+    def test_deutsche_zahlen_und_betraege_ohne_vorzeichen(self):
+        buchungen, _ = tr_import.parse_tr_csv(TR_CSV, pf.lade_plan(self.s))
+        sparplan = next(b for b in buchungen if b.typ == "sparplan")
+        self.assertAlmostEqual(sparplan.betrag_eur, 450.0)     # Minuszeichen fällt weg
+        self.assertAlmostEqual(sparplan.stueck, 2.6779)
+        kauf = next(b for b in buchungen if b.typ == "satellit_kauf")
+        self.assertAlmostEqual(kauf.gebuehr_eur, 1.0)
+
+    def test_wiederholter_import_bucht_nichts_doppelt(self):
+        """pytr exportiert immer die ganze Historie — ohne Abgleich verdoppelt sich alles."""
+        erst = tr_import.uebernehmen(self.s, TR_CSV)
+        self.assertGreater(erst["gebucht"], 0)
+        zweit = tr_import.uebernehmen(self.s, TR_CSV)
+        self.assertEqual(zweit["gebucht"], 0)
+        self.assertEqual(zweit["bereits_gebucht"], erst["gebucht"])
+        self.assertEqual(len(pf.lies_ledger(self.s)), erst["gebucht"])
+
+    def test_vorschau_schreibt_nicht(self):
+        v = tr_import.vorschau(self.s, TR_CSV)
+        self.assertGreater(v["neu"], 0)
+        self.assertEqual(len(pf.lies_ledger(self.s)), 0)
+        self.assertEqual(v["zeitraum"][0], "2026-09-06")
+
+    def test_datumsformate(self):
+        self.assertEqual(tr_import._datum("06.09.2026"), "2026-09-06")
+        self.assertEqual(tr_import._datum("2026-09-06"), "2026-09-06")
+        self.assertEqual(tr_import._datum("2026-09-06T14:33:00Z"), "2026-09-06")
+        self.assertIsNone(tr_import._datum("irgendwann"))
+
+    def test_fremde_datei_wird_klar_abgelehnt(self):
+        with self.assertRaises(ValueError) as ctx:
+            tr_import.parse_tr_csv("a,b,c\n1,2,3\n", None)
+        self.assertIn("pytr", str(ctx.exception))
 
 
 class TestAktionsWhitelist(unittest.TestCase):

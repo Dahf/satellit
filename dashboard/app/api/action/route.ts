@@ -13,6 +13,7 @@ const ALLOWED: Record<string, string> = {
   "ledger.storno": "/ledger/storno",
   "depot.abgleich": "/depot/abgleich",
   "portfolio.setup": "/portfolio/setup",
+  "portfolio.import": "/portfolio/import",
 };
 
 export async function POST(req: NextRequest) {

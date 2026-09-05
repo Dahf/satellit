@@ -88,25 +88,74 @@ export interface Ampel {
   note: string;
 }
 
+export interface EtfEintrag {
+  isin: string;
+  symbol: string;
+  name: string;
+  index: string;
+  ter: number;
+  ertrag: string;
+  gruppe: string;
+  hinweis?: string;
+}
+
+export interface Monat {
+  monat: string;
+  plan_eur: number | null;
+  ausgegeben_eur: number;
+  offen_eur: number | null;
+  posten: { datum: string; typ: string; symbol: string; betrag_eur: number }[];
+}
+
+export interface Gewinn {
+  eingezahlt_netto_eur: number;
+  wert_eur: number;
+  gewinn_eur: number;
+  gewinn_pct: number | null;
+  unrealisiert_eur: number;
+  xirr_pct: number | null;
+  xirr_hinweis: string;
+}
+
+export interface Band {
+  status: "ok" | "unter" | "ueber" | "unbekannt";
+  anteil: number | null;
+  low: number;
+  high: number;
+  ziel: number;
+}
+
 export interface View {
   schema: number;
   as_of: string;
   erzeugt: string;
   demo: boolean;
+  onboarding_noetig: boolean | null;
   portfolio: {
     satellit_eur: number | null;
     gebunden_eur: number | null;
     cash_eur: number | null;
+    cash_je_topf: Record<string, number>;
     hoch_eur: number | null;
     drawdown: number | null;
     positionen: { offen: number; max: number };
     offenes_risiko_pct: number | null;
     offenes_risiko_max_pct: number | null;
     kern_eur: number | null;
+    kern_etf_eur: number | null;
+    kern_aktien_eur: number | null;
+    kern_aktien_cash_eur: number | null;
     gesamt_eur: number | null;
+    kern_pct: number | null;
+    satellit_pct: number | null;
+    band: Partial<Band>;
+    kauffenster: { offen?: boolean; grund?: string; naechstes?: string | null };
   };
-  monat: unknown | null;
-  gewinn: unknown | null;
+  monat: Monat | null;
+  gewinn: Gewinn | null;
+  sparplan: { tag: number; offen: boolean; rate_eur: number } | null;
+  etf: { isin?: string; symbol?: string; name?: string; anteil_kern?: number } | null;
+  etf_katalog: EtfEintrag[];
   ampel: Record<string, Ampel>;
   entscheidungen: Entscheidung[];
   abgelehnt: Entscheidung[];

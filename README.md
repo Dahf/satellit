@@ -37,8 +37,8 @@ Das Journal (`state/theses/`) ist `trader-memory-core` aus [tradermonty/claude-t
 git clone <dieses Repo> satellit && cd satellit
 cp .env.example .env            # Pushover-Keys, DASHBOARD_PASSWORD, SESSION_SALT, SATELLIT_API_TOKEN eintragen
 docker compose build
-docker compose run --rm satellit account set --equity 5000      # Satelliten-Kapital in EUR
-docker compose run --rm satellit account dry-run --until 2026-09-25   # Trockenlauf: 2 Wochenenden
+# Depot einrichten: 90/10-Aufteilung, Eröffnungsbuchungen, Trockenlauf über 2 Wochenenden
+docker compose run --rm satellit portfolio setup --start 5000 --rate 500 --etf IE00BK5BQT80 --etf-anteil 0.8
 docker compose run --rm satellit universe --force --check       # iShares-Download + Ticker-Zuordnung prüfen
 docker compose run --rm satellit weekly                         # erster kompletter Lauf (dauert 5–15 min)
 docker compose up -d                                            # Scheduler: jeden Samstag 08:00
@@ -100,7 +100,12 @@ erzeugt eines, das du einchecken solltest. Weitere shadcn-Komponenten: `npx shad
 | `universe [--force] [--check]` | Konstituenten laden, Ticker-Zuordnung prüfen |
 | `prices [--symbols A,B]` | Kurs-Cache aktualisieren |
 | `regime` | US-Ampel-Skills ausführen und Historie zeigen |
-| `account set --equity X` / `show` / `dry-run --until D` / `reset-kill` | Satelliten-Kapital (wöchentlich aus der TR-App eintragen), Kill-Switch |
+| `account set --equity X` / `show` / `dry-run --until D` / `reset-kill` | Satelliten-Kapital, Kill-Switch |
+| `portfolio setup --start X --rate Y --etf ISIN` | Depot einrichten: 90/10-Aufteilung, Eröffnungsbuchungen, Trockenlauf |
+| `portfolio show` | Gesamtwert, Kern/Satellit, Einzahlungen, Gewinn, Monatsausgabe, Kauffenster |
+| `ledger add --typ … --topf … --betrag X` / `list [--monat]` / `storno <id>` | Kassenbuch: jede Geldbewegung. Korrektur nur per Gegenbuchung |
+| `tr-import <datei> [--vorschau]` | Umsatzliste aus Trade Republic übernehmen (siehe unten) |
+| `view` | Anzeige-Payload ohne Netz neu bauen |
 | `journal new --symbol SYM [--entry --stop --core]` | These anlegen (liest Kurs/Stop/Sektor aus dem letzten Screener-Lauf) + Positionsgröße |
 | `journal open <id> --price P --shares N [--date D]` | Ausführung eintragen → ACTIVE |
 | `journal stop <id> --stop S` | Trailing-Stop nachziehen (nie senken — wird abgelehnt) |

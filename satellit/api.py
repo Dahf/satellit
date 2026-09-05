@@ -273,6 +273,25 @@ def action_portfolio_setup(settings: Settings, body: dict) -> dict:
             "buchungen": n, "trockenlauf_bis": acc.dry_run_until}
 
 
+def action_portfolio_import(settings: Settings, body: dict) -> dict:
+    """Umsatzliste aus Trade Republic übernehmen — zweistufig.
+
+    Ohne `uebernehmen=true` wird nur gezeigt, was gebucht würde. Das Format stammt aus
+    einem inoffiziellen Werkzeug und ist nirgends dokumentiert; blind zu schreiben wäre
+    unverantwortlich.
+    """
+    from . import tr_import
+
+    inhalt = body.get("inhalt") or ""
+    if not inhalt.strip():
+        raise ValueError("Kein Dateiinhalt übermittelt")
+    if len(inhalt.encode("utf-8")) > MAX_IMPORT_BYTES:
+        raise ValueError(f"Datei zu groß (Grenze {MAX_IMPORT_BYTES // 1024 // 1024} MB)")
+    if body.get("uebernehmen"):
+        return tr_import.uebernehmen(settings, inhalt)
+    return tr_import.vorschau(settings, inhalt)
+
+
 ACTIONS = {
     "/journal/new": action_journal_new,
     "/journal/open": action_journal_open,
@@ -284,6 +303,7 @@ ACTIONS = {
     "/ledger/storno": action_ledger_storno,
     "/depot/abgleich": action_depot_abgleich,
     "/portfolio/setup": action_portfolio_setup,
+    "/portfolio/import": action_portfolio_import,
 }
 
 

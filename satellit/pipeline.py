@@ -455,11 +455,14 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
             symbols.append(s)
             scales[s] = 1.0
     # Kern-Titel mit abrufen: ETF und Kern-Aktien stehen nicht im Screener-Universum,
-    # ohne Kurse ließe sich der Kern nicht bewerten.
-    for kern_symbol in _kern_symbole(settings):
-        if kern_symbol not in scales:
-            symbols.append(kern_symbol)
-            scales[kern_symbol] = 1.0
+    # ohne Kurse ließe sich der Kern nicht bewerten. Im Demo-Modus bleibt das aus — die
+    # synthetische Quelle erfindet Kurse für jedes Symbol, und ein frei erfundener
+    # ETF-Kurs erzeugt einen frei erfundenen Gewinn.
+    if not demo:
+        for kern_symbol in _kern_symbole(settings):
+            if kern_symbol not in scales:
+                symbols.append(kern_symbol)
+                scales[kern_symbol] = 1.0
     index_symbols = {}
     for region, cfg in settings.get("universe.regions", {}).items():
         if cfg.get("index_symbol") and not demo:

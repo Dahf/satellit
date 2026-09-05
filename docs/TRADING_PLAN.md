@@ -50,6 +50,7 @@
 2. **Schriftliche These vor dem Kauf** im Journal (`trader-memory-core`, Typ `core_holding` im Feld `setup_type`, Review-Datum +6 Monate). Ohne These kein Kauf. Die These benennt explizit die **Kill-Kriterien** (was müsste passieren, damit ich verkaufe).
 3. **Max. 5 % des Gesamtportfolios pro Titel** (zum Kaufzeitpunkt). Bei 20 % des Kerns sind das 4–6 Titel. Keine Ausnahme.
 4. **Kauf nur an festen Terminen:** erste Handelswoche im Januar, April, Juli, Oktober. Zwischen den Terminen werden Kandidaten nur notiert, nie gekauft.
+   *Ausnahme Depotaufbau:* Der **einmalige** Kern-Startbetrag nach `docs/KERN.md` Abschnitt 5.3 darf beim Aufbau des Depots in einem Zug investiert werden — er ist Einrichtung, keine Timing-Entscheidung. Die Regeln 3.2 (schriftliche These mit Kill-Kriterien) und 3.3 (5 % je Titel) gelten unverändert. Ab dem zweiten Kauf gelten ausschließlich die vier Termine. Siehe `docs/CHANGELOG_REGELN.md`, Eintrag 2026-09-05.
 5. **Kein Doppelhalten.** Ein Titel ist entweder Kern oder Satellit. Ein Satelliten-Trade in einer Kern-Aktie ist verboten, eine Kern-Position in einem Satelliten-Titel ebenfalls (Prüfung: der Screener blendet Kern-Titel aus).
 
 Kriterienkatalog für Kern-Aktien: `docs/KERN.md`, Abschnitt 4.
@@ -186,7 +187,7 @@ Fällt der Sonntags-Slot aus, werden **keine neuen Einstiege** gemacht. Stop-Nac
 
 ### 10.2 Kill-Switch (mechanisch, kein Ermessen)
 Der Satellit stoppt **neue Einstiege** sofort, wenn eine der Bedingungen eintritt:
-- **Drawdown ≥ 25 %** vom bisherigen Höchststand des Satelliten-Kapitals (wöchentlich zu Freitagskursen gemessen, inkl. offener Positionen).
+- **Drawdown ≥ 25 %** vom bisherigen Höchststand des Satelliten-Kapitals (wöchentlich zu Freitagskursen gemessen, inkl. offener Positionen). *Einlagenbereinigt:* Bei Ein- und Auszahlungen wandert der Höchststand um denselben Betrag mit — gemessen wird die Kursentwicklung, nicht der Kapitalzufluss. Ohne diese Bereinigung machte eine Einzahlung einen laufenden Verlust unsichtbar (`docs/CHANGELOG_REGELN.md`, Eintrag 2026-09-05).
 - **Expectancy ≤ 0** nach **30 abgeschlossenen Trades** (Expectancy = Ø Gewinn × Trefferquote − Ø Verlust × (1 − Trefferquote), in R).
 
 Danach: bestehende Positionen laufen nach Abschnitt 7 aus. Vor einem Neustart: schriftliche Analyse aller Trades, Ursachenhypothese, Regeländerung nach Abschnitt 12, dann Neustart mit 0,5 % Risiko und neuem 20-Trade-Zähler. Der Satellit wird währenddessen **nicht** aus dem Kern aufgefüllt.

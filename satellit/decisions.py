@@ -455,11 +455,13 @@ def urteil_kern_startbetrag(ctx: Kontext) -> list[Decision]:
             hinweise=["In der Trade-Republic-App als Einmalkauf, danach hier eintragen.",
                       "Einmal entscheiden, dann nicht mehr ändern (KERN.md 5.3)."],
             belege=[
-                Beleg("Warum jetzt", "Der Kern folgt keiner Ampel und keinem Kauffenster.", True,
+                Beleg("Warum jetzt", "„Kern-Sparplan startet sofort, unabhängig vom Satelliten.“", True,
+                      "Trading-Plan 10.1"),
+                Beleg("Ampel", "ohne Bedeutung für den Kern — er wird nicht getimt.", True,
                       "Trading-Plan 2"),
                 Beleg("Modus", "Einmalkauf statt gestreckt — so festgelegt.", None, "KERN.md 5.3"),
             ],
-            regeln=["Trading-Plan 2", "KERN.md 5.3"],
+            regeln=["Trading-Plan 10.1", "Trading-Plan 2", "KERN.md 5.3"],
             aktion=AktionSpec(
                 aktion="ledger.add", label="Kauf eintragen",
                 felder=[_feld("betrag_eur", "Bezahlt (EUR)", "dezimal", round(etf_eur, 2), True),

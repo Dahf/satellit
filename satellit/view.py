@@ -17,6 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from . import portfolio
 from .config import Settings
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ def bauen(res, settings: Settings) -> dict:
             "satellit_eur": kw.get("satellit_eur", equity),
             "gebunden_eur": gebunden,
             "cash_eur": kw.get("cash_eur", max(0.0, equity - gebunden) if equity else None),
+            "cash_je_topf": kw.get("cash_je_topf") or {},
             "hoch_eur": acc.high_water_mark,
             "drawdown": acc.drawdown,
             "positionen": {"offen": len(res.positions),
@@ -112,6 +114,9 @@ def bauen(res, settings: Settings) -> dict:
         "gewinn": (res.kern or {}).get("gewinn"),
         "sparplan": (res.kern or {}).get("sparplan"),
         "etf": (res.kern or {}).get("etf"),
+        # Nur für die Ersteinrichtung: das Dashboard hat keinen Zugriff auf config/,
+        # es mountet ausschließlich state/. Danach ist der Katalog überflüssig.
+        "etf_katalog": [] if (res.kern or {}).get("eingerichtet") else portfolio.lade_etf_katalog(settings),
         "ampel": {r: {**asdict(rd), "label": rd.label} for r, rd in res.readings.items()},
         "entscheidungen": [asdict(d) for d in res.entscheidungen],
         "abgelehnt": [asdict(d) for d in res.abgelehnt],
