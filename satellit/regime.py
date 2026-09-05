@@ -50,8 +50,21 @@ class RegimeReading:
 
 # ------------------------------------------------------------------ US scripts
 def _newest(pattern: str) -> str | None:
-    files = glob.glob(pattern)
+    # Die Skills legen neben dem Report eine fortlaufende *_history.json ins
+    # selbe Verzeichnis. Die ist eine Liste, kein Report — nie mitzählen.
+    files = [f for f in glob.glob(pattern) if not os.path.basename(f).endswith("_history.json")]
     return max(files, key=os.path.getmtime) if files else None
+
+
+def _composite_score(path: str) -> float | None:
+    """composite.composite_score aus einem Skill-Report. None, wenn die Datei nicht passt."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return float(data["composite"]["composite_score"])
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        log.warning("Report %s nicht verwertbar: %s", path, exc)
+        return None
 
 
 def _run_script(script: Path, args: list[str], timeout: int = 300) -> tuple[bool, str]:
@@ -79,9 +92,9 @@ def run_us_scores(settings: Settings) -> tuple[float | None, float | None, list[
     ok, msg = _run_script(skills / "uptrend-analyzer" / "scripts" / "uptrend_analyzer.py", ["--output-dir", str(out_up)])
     if ok:
         f = _newest(str(out_up / "uptrend_analysis_*.json"))
-        if f:
-            with open(f, encoding="utf-8") as fh:
-                uptrend = float(json.load(fh)["composite"]["composite_score"])
+        uptrend = _composite_score(f) if f else None
+        if uptrend is None:
+            notes.append("uptrend-analyzer: kein verwertbarer Report")
     else:
         notes.append(f"uptrend-analyzer fehlgeschlagen: {msg}")
 
@@ -89,9 +102,9 @@ def run_us_scores(settings: Settings) -> tuple[float | None, float | None, list[
                           ["--output-dir", str(out_br)])
     if ok:
         f = _newest(str(out_br / "market_breadth_*.json"))
-        if f:
-            with open(f, encoding="utf-8") as fh:
-                breadth = float(json.load(fh)["composite"]["composite_score"])
+        breadth = _composite_score(f) if f else None
+        if breadth is None:
+            notes.append("market-breadth-analyzer: kein verwertbarer Report")
     else:
         notes.append(f"market-breadth-analyzer fehlgeschlagen: {msg}")
     return uptrend, breadth, notes
