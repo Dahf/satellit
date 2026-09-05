@@ -58,13 +58,17 @@ export function Aufteilung({ v }: { v: View }) {
       </div>
 
       {(p.kern_aktien_cash_eur ?? 0) > 0 && (
-        <p className="mt-2 text-etikett text-muted-foreground">
+        <p className="mt-2 text-etikett leading-relaxed text-muted-foreground">
           Davon {eur(p.kern_aktien_cash_eur)} für Kern-Aktien zurückgelegt
           {p.kauffenster?.offen
             ? " — das Kauffenster ist offen."
             : p.kauffenster?.naechstes
               ? ` — nächstes Kauffenster ab ${p.kauffenster.naechstes}.`
-              : "."}
+              : "."}{" "}
+          <a href="#kern-kandidaten" className="underline underline-offset-2">
+            Geprüfte Kandidaten
+          </a>{" "}
+          stehen weiter unten.
         </p>
       )}
     </section>

@@ -112,15 +112,37 @@ def _datum(text: str) -> str | None:
     return None
 
 
-def _topf_fuer(isin: str, plan) -> str:
-    """Kern-ETF, Kern-Aktie oder Satellit? Die ISIN entscheidet."""
-    if isin and plan is not None and isin == plan.etf_isin:
+def _topf_fuer(isin: str, plan, kern_isins: set[str] | None = None) -> str:
+    """Kern-ETF, Kern-Aktie oder Satellit? Die ISIN entscheidet.
+
+    `kern_isins` sind die ISINs offener Kern-Thesen. Ohne sie landete jeder importierte
+    Aktienkauf im Satelliten — auch eine Kern-Aktie. Die Folge war ein Satellit, der im
+    Kassenbuch größer aussieht, als er ist, und ein Kern, dessen Aktienteil nie erscheint.
+    """
+    if not isin:
+        return "satellit"
+    if plan is not None and isin == plan.etf_isin:
         return "kern_etf"
+    if kern_isins and isin.upper() in kern_isins:
+        return "kern_aktie"
     return "satellit"
 
 
+def kern_isins(settings) -> set[str]:
+    """ISINs der offenen Kern-Thesen — die einzige Stelle, an der eine Aktie zum Kern gehört."""
+    from . import journal
+
+    out: set[str] = set()
+    for these in journal.core_positions(settings):
+        prov = (these.get("origin") or {}).get("raw_provenance") or {}
+        if prov.get("isin"):
+            out.add(str(prov["isin"]).strip().upper())
+    return out
+
+
 def parse_tr_csv(text: str, plan=None, mit_geldbewegungen: bool = False,
-                 ab: str | None = None) -> tuple[list[Buchung], list[str]]:
+                 ab: str | None = None, kern: set[str] | None = None
+                 ) -> tuple[list[Buchung], list[str]]:
     """CSV -> Buchungen + Warnungen. Wirft nur, wenn die Datei gar keine Tabelle ist.
 
     `mit_geldbewegungen=False` (Standard) überspringt Ein- und Auszahlungen: bei Trade
@@ -129,7 +151,11 @@ def parse_tr_csv(text: str, plan=None, mit_geldbewegungen: bool = False,
 
     `ab` begrenzt auf Buchungen ab diesem Datum — nützlich, wenn das Depot einen definierten
     Startzeitpunkt hat und die Vorgeschichte nicht dazugehört.
+
+    `kern` sind die ISINs der Kern-Aktien (siehe `kern_isins`). Ohne sie landet jeder
+    Aktienkauf im Satelliten.
     """
+    kern = {s.upper() for s in (kern or set())}
     warnungen: list[str] = []
     uebersprungen = {"karte": 0, "geld": 0, "alt": 0}
     zeilen = text.splitlines()
@@ -200,12 +226,10 @@ def parse_tr_csv(text: str, plan=None, mit_geldbewegungen: bool = False,
             continue
         isin = zelle(row, "isin").upper()
         if typ == "kauf":
-            typ = "kern_kauf" if _topf_fuer(isin, plan) == "kern_etf" else "satellit_kauf"
-            topf = _topf_fuer(isin, plan)
-            if topf == "kern_etf":
-                typ = "sparplan"
+            topf = _topf_fuer(isin, plan, kern)
+            typ = {"kern_etf": "sparplan", "kern_aktie": "kern_kauf"}.get(topf, "satellit_kauf")
         elif typ == "verkauf":
-            topf = _topf_fuer(isin, plan)
+            topf = _topf_fuer(isin, plan, kern)
             typ = "kern_verkauf" if topf.startswith("kern") else "satellit_verkauf"
 
         stueck = parse_number(zelle(row, "stueck"))
@@ -268,7 +292,7 @@ def vorschau(settings: Settings, text: str, mit_geldbewegungen: bool = False,
     Bei einem undokumentierten Fremdformat ist ein stiller Direktimport nicht vertretbar.
     """
     buchungen, warnungen = parse_tr_csv(text, lade_plan(settings), mit_geldbewegungen,
-                                        _startdatum(settings, ab))
+                                        _startdatum(settings, ab), kern=kern_isins(settings))
     neu, doppelt = _neue(settings, buchungen)
     nach_typ: dict[str, int] = {}
     for b in neu:
@@ -285,7 +309,7 @@ def vorschau(settings: Settings, text: str, mit_geldbewegungen: bool = False,
 def uebernehmen(settings: Settings, text: str, mit_geldbewegungen: bool = False,
                 ab: str | None = None) -> dict:
     buchungen, warnungen = parse_tr_csv(text, lade_plan(settings), mit_geldbewegungen,
-                                        _startdatum(settings, ab))
+                                        _startdatum(settings, ab), kern=kern_isins(settings))
     neu, doppelt = _neue(settings, buchungen)
     geschrieben = schreibe_buchungen(settings, neu)
     log.info("TR-Import: %d neu, %d bereits vorhanden, %d Warnungen", geschrieben, doppelt, len(warnungen))

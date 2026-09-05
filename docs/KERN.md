@@ -88,12 +88,14 @@ Ziel: Unternehmen, die man **drei Jahre nicht anschauen muss**. Der Katalog ist 
 | # | Kriterium | Prüfung |
 |---|---|---|
 | 1 | **Geschäftsmodell in zwei Sätzen erklärbar** — womit verdient das Unternehmen Geld, und warum kauft der Kunde dort? | These im Journal, Satz 1 und 2 |
-| 2 | **Wachstum über den Zyklus:** Umsatz und Gewinn je Aktie über 5–10 Jahre gestiegen (nicht jedes Jahr, aber der Trend) | Geschäftsberichte / Anbieter-Datenblatt |
+| 2 | **Wachstum über den Zyklus:** Umsatz und Gewinn je Aktie über 5–10 Jahre gestiegen (nicht jedes Jahr, aber der Trend) | Geschäftsberichte / Anbieter-Datenblatt · Scan: nur soweit die Quelle zurückreicht ¹ |
 | 3 | **Kapitalrendite über Kapitalkosten:** ROIC bzw. ROE nachhaltig > 10 % (Banken/Versicherer: ROE) | 5-Jahres-Durchschnitt |
 | 4 | **Bilanz:** Nettoverschuldung / EBITDA < 2,5 (Versorger, Immobilien, Banken: branchenüblich beurteilen) | letzter Jahresabschluss |
-| 5 | **Free Cashflow positiv** in mindestens 8 der letzten 10 Jahre | Cashflow-Rechnung |
+| 5 | **Free Cashflow positiv** in mindestens 8 der letzten 10 Jahre | Cashflow-Rechnung · Scan: nur soweit die Quelle zurückreicht ¹ |
 | 6 | **Börsennotiert > 5 Jahre**, Marktkapitalisierung > 5 Mrd. €, bei Trade Republic handelbar | — |
 | 7 | **Kill-Kriterien schriftlich** — mindestens zwei konkrete Ereignisse, die zum Verkauf führen (z. B. "zwei Jahre in Folge negativer FCF", "Nettoverschuldung/EBITDA > 4", "Kerngeschäft verliert Marktanteil zwei Jahre in Folge") | These im Journal |
+
+¹ `satellit kern-scan` bezieht die Jahresabschlüsse von Yahoo, das typischerweise 4–5 Jahre liefert. Das 5- bis 10-Jahres-Fenster dieser beiden Kriterien ist damit nur teilweise abgedeckt. Sie werden dann als **offen** ausgewiesen, nie als erfüllt — wer sie schließen will, liest die Geschäftsberichte.
 
 ### Ausschlusskriterien
 - Turnaround-Storys, Übernahmefantasie, Hype-Themen, IPOs jünger als 5 Jahre.
@@ -106,10 +108,14 @@ Ziel: Unternehmen, die man **drei Jahre nicht anschauen muss**. Der Katalog ist 
 - Bewertung nicht im obersten Zehntel der eigenen 10-Jahres-Historie (KGV/KUV) — keine harte Regel, weil Qualität selten billig ist.
 
 ### Ablauf je Kern-Aktie
-1. These mit Muss-Kriterien und Kill-Kriterien im Journal: `python -m satellit journal new --symbol <SYMBOL> --core --entry <Kurs> --stop 0` (Stop 0 = kein Stop; Review-Intervall 180 Tage).
-2. Kauf **nur** in der ersten Handelswoche von Jan/Apr/Jul/Okt, max. 5 % des Gesamtportfolios.
-3. ISIN in `config/exclusions.yaml` unter `core_holdings` eintragen, damit der Screener den Titel ausblendet.
+0. **Kandidaten suchen:** `python -m satellit kern-scan` prüft das Index-Universum gegen die Kriterien 2–6 und listet, was besteht. Im Dashboard steht dasselbe unter „Kern-Aktien: geprüfte Kandidaten", dort auch die Watchlist für eigene Titel (`--watchlist` bzw. „Liste prüfen"). Der Scan ruft je Titel Jahresabschlüsse ab und dauert deshalb Minuten; das Ergebnis hält 90 Tage, was zum Kauffenster passt. Er läuft **nicht** im Wochenlauf mit.
+1. These mit Geschäftsmodell und mindestens zwei Kill-Kriterien anlegen — über den Knopf am Kandidaten (beide sind Pflichtfelder) oder `python -m satellit journal new --symbol <SYMBOL> --core --entry <Kurs> --stop 0` (Stop 0 = kein Stop; Review-Intervall 180 Tage).
+2. Kauf **nur** in der ersten Handelswoche von Jan/Apr/Jul/Okt, max. 5 % des Gesamtportfolios. Beides prüft das Dashboard beim Buchen; ohne These wird der Kauf abgelehnt.
+3. Der Eintrag in `config/exclusions.yaml` unter `core_holdings` geschieht beim Anlegen der These automatisch. Schlägt das Schreiben fehl (Datei im Container schreibgeschützt), meldet die Antwort das — dann von Hand nachtragen, sonst schlägt der Screener den Titel zusätzlich im Satelliten vor.
 4. Halbjährlicher Review: Kill-Kriterien abgleichen, sonst nichts tun.
+
+### Was der Scan nicht kann
+Die Kriterien 1 und 7 sind menschliches Urteil und bleiben offen, bis du sie beim Anlegen der These beantwortest. Bei den Kriterien 2 und 5 reicht die Datenquelle (Yahoo, typischerweise 4–5 Geschäftsjahre) nicht über das geforderte 5- bis 10-Jahres-Fenster; solche Kriterien werden als **offen** ausgewiesen, nie als erfüllt. „Nicht geprüft" ist nicht „erfüllt" — ein Katalog, der Unbekanntes durchwinkt, prüft nichts. Was daran zu tun ist, entscheidest du am Geschäftsbericht, nicht am Dashboard.
 
 ---
 

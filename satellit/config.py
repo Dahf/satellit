@@ -86,6 +86,39 @@ class Settings:
         return default if data is None else data
 
 
+def risikoprofil(settings: Settings, equity_eur: float | None) -> dict[str, Any]:
+    """Die effektiven Risiko-Grenzen für ein Satelliten-Kapital.
+
+    Unterhalb von risk.kleines_depot_unter_eur gelten die Werte aus risk.klein: wenige,
+    größere Positionen. Grund ist Arithmetik, keine Meinung — bei 250 EUR Kapital und
+    0,5 % Risiko je Trade sind fünf Positionen à 25 % rechnerisch nicht darstellbar, und
+    der Screener meldete dafür bisher nur ZU_TEUER, ohne den Grund zu nennen.
+
+    Wächst der Satellit über die Schwelle, gelten wieder die Regelwerte — ohne Zutun.
+    max_open_risk_pct steht bewusst nicht hier: es begrenzt das Klumpenrisiko und gilt
+    unverändert (Trading-Plan 6).
+
+    Aufgelöst an genau einer Stelle, weil Screener und Auswahl dieselben Zahlen brauchen —
+    liefen sie auseinander, würde der Screener Titel durchlassen, die die Auswahl verwirft.
+    """
+    schwelle = float(settings.get("risk.kleines_depot_unter_eur", 0) or 0)
+    klein = bool(equity_eur is not None and schwelle > 0 and equity_eur < schwelle)
+    quelle = "risk.klein." if klein else "risk."
+
+    def _wert(name: str, default: Any) -> Any:
+        # Fehlt ein Wert unter risk.klein, gilt der Regelwert — kein stilles Auffüllen mit 0.
+        return settings.get(f"{quelle}{name}", settings.get(f"risk.{name}", default))
+
+    return {
+        "klein": klein,
+        "max_positions": int(_wert("max_positions", 5)),
+        "max_position_pct": float(_wert("max_position_pct", 25)),
+        "max_per_sector": int(_wert("max_per_sector", 2)),
+        "bruchstuecke": bool(settings.get("risk.bruchstuecke", False)),
+        "min_order_eur": float(settings.get("risk.min_order_eur", 1.0)),
+    }
+
+
 def load_settings(path: str | Path | None = None, overrides: dict[str, Any] | None = None) -> Settings:
     p = Path(path) if path else DEFAULT_SETTINGS
     with open(p, encoding="utf-8") as fh:

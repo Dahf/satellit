@@ -126,8 +126,12 @@ gibt. Der Build nutzt `npm ci` gegen das eingecheckte `package-lock.json`.
    (Dual Listings, exotische Ticker); über 10 % sind ein Zeichen für Yahoo-Rate-Limits — dann `data.batch_size` senken
    und `data.batch_pause_seconds` erhöhen.
 3. **Ampel:** In den ersten zwei Läufen steht die Ampel wegen der Hysterese auf ROT („Hysterese-Aufbau: Lauf 1/2").
-   Das ist gewollt und deckt sich mit dem Trockenlauf.
-4. **US-Skills:** `satellit regime` muss zwei Scores liefern. Scheitert ein Skill (Netz, CSV-Format), nutzt die Pipeline
+   Das ist gewollt und deckt sich mit dem Trockenlauf. Wer den Trockenlauf beim Einrichten abwählt, wartet trotzdem
+   diese zwei Läufe — die Hysterese ist die härtere der beiden Bremsen.
+4. **Satellit zu klein?** Unterhalb von rund 1.000 € Satelliten-Kapital lässt sich aus Risiko je Trade und Stopabstand
+   keine handelbare Position bilden. Statt wortlos „zu teuer" zu melden, nennt die Ansicht dann die rechnerisch nötige
+   Summe. Für kleine Depots greift zusätzlich das Konzentrationsprofil aus Trading-Plan 6.1 (2 Positionen statt 5).
+5. **US-Skills:** `satellit regime` muss zwei Scores liefern. Scheitert ein Skill (Netz, CSV-Format), nutzt die Pipeline
    den letzten bekannten Stand und schreibt das in den Bericht.
 
 ## Befehle
@@ -138,6 +142,7 @@ gibt. Der Build nutzt `npm ci` gegen das eingecheckte `package-lock.json`.
 | `universe [--force] [--check]` | Konstituenten laden, Ticker-Zuordnung prüfen |
 | `prices [--symbols A,B]` | Kurs-Cache aktualisieren |
 | `regime` | US-Ampel-Skills ausführen und Historie zeigen |
+| `kern-scan [--watchlist] [--demo] [--max N]` | Kern-Aktien gegen den Kriterienkatalog (KERN.md 6) prüfen. Läuft **nicht** im Wochenlauf mit: je Titel ein Fundamentaldaten-Abruf, deshalb Minuten. Ergebnis hält 90 Tage |
 | `account set --equity X` / `show` / `dry-run --until D` / `reset-kill` | Satelliten-Kapital, Kill-Switch |
 | `portfolio setup --start X --rate Y --etf ISIN` | Depot einrichten: 90/10-Aufteilung, Eröffnungsbuchungen, Trockenlauf |
 | `portfolio show` | Gesamtwert, Kern/Satellit, Einzahlungen, Gewinn, Monatsausgabe, Kauffenster |

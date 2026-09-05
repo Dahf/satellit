@@ -11,13 +11,14 @@ import pandas as pd
 
 from . import decisions as dec
 from . import regime
-from .config import Settings
+from .config import Settings, risikoprofil
 from .pipeline import WeeklyResult
 
 # Eine Quelle für die Zahlenformatierung — decisions.py formuliert dieselben Werte für die
 # Oberfläche, und zwei Formatierer driften erfahrungsgemäß auseinander.
 _f = dec.zahl
 _pct = dec.prozent
+_stueck = dec.stueck
 
 _ZEICHEN = {dec.KAUFEN: "🟢", dec.VERKAUFEN: "🔻", dec.STOP_ANHEBEN: "⬆️", dec.PRUEFEN: "⚠️",
             dec.HALTEN: "·", dec.WARTEN: "⏸", dec.NICHT_KAUFEN: "–", dec.NACHKAUFEN: "➕"}
@@ -62,7 +63,13 @@ def build_markdown(res: WeeklyResult, settings: Settings) -> str:
     if acc.satellite_equity_eur:
         dd = acc.drawdown
         L.append(f"- Kapital: **{_f(acc.satellite_equity_eur, 0)} EUR** (Stand {acc.updated}) · Hoch {_f(acc.high_water_mark, 0)} EUR · Drawdown {_pct(dd)}")
-        L.append(f"- Offenes Risiko: {_f(res.open_risk_pct, 2)} % (Limit {settings.get('risk.max_open_risk_pct')} %) · Positionen {len(res.positions)}/{settings.get('risk.max_positions')}")
+        # Die Grenzen aus dem wirksamen Profil, nicht aus den Regelwerten — bei kleinem
+        # Satelliten gelten andere, und eine falsche Zahl im Bericht ist schlimmer als keine.
+        profil = risikoprofil(settings, res.account.satellite_equity_eur)
+        L.append(f"- Offenes Risiko: {_f(res.open_risk_pct, 2)} % (Limit {settings.get('risk.max_open_risk_pct')} %) · Positionen {len(res.positions)}/{profil['max_positions']}")
+        if profil["klein"]:
+            L.append(f"- Kleines Depot: höchstens {profil['max_positions']} Positionen à "
+                     f"{_f(profil['max_position_pct'], 0)} % (Trading-Plan 6.1)")
     else:
         L.append("- ⚠️ Kein Kapital hinterlegt: `satellit account set --equity <EUR>` — ohne Kapital keine Positionsgrößen.")
     L.append("")
@@ -88,7 +95,7 @@ def build_markdown(res: WeeklyResult, settings: Settings) -> str:
         L.append("| Symbol | Name | Region | Sektor | Kurs | Ausbruch | Stop | Stücke | Wert EUR | Risiko EUR | Limit |")
         L.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for p in res.proposals:
-            L.append(f"| **{p.symbol}** | {p.name[:28]} | {p.region} ({p.ampel}) | {p.sector} | {_f(p.close)} {p.currency} | {_f(p.breakout_level)} | {_f(p.initial_stop)} | {p.shares} | {_f(p.value_eur, 0)} | {_f(p.risk_eur, 0)} ({_f(p.risk_pct, 2)} %) | ≤ {_f(p.limit_price)} |")
+            L.append(f"| **{p.symbol}** | {p.name[:28]} | {p.region} ({p.ampel}) | {p.sector} | {_f(p.close)} {p.currency} | {_f(p.breakout_level)} | {_f(p.initial_stop)} | {_stueck(p.shares)} | {_f(p.value_eur, 0)} | {_f(p.risk_eur, 0)} ({_f(p.risk_pct, 2)} %) | ≤ {_f(p.limit_price)} |")
         L.append("")
         L.append("Ablauf je Einstieg: Chart prüfen (Base ≥ 4 Wochen?) → `satellit journal new --symbol … --entry … --stop …` → Montag Limit-Order (tagesgültig) → bei Ausführung `satellit journal open <id> --price … --shares …` → Stop-Market-Order (360 Tage) auf den Initialstop.")
     else:

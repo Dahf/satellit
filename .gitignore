@@ -4,8 +4,13 @@ state/reports/
 state/regime/
 state/universe/*.csv
 state/theses/
+state/fundamentals/
 state/*.json
 state/*.csv
+state/*.log
+state/kern_watchlist.yaml
+state/portfolio.yaml
+state/account.yaml
 __pycache__/
 *.pyc
 .pytest_cache/

@@ -61,6 +61,43 @@ def cmd_weekly(a, s: Settings) -> int:
     return 0
 
 
+def cmd_kern_scan(a, s: Settings) -> int:
+    """Kandidaten für den Kern-Aktienteil gegen KERN.md 6 prüfen."""
+    from .kern_scan import run_kern_scan, schreibe_stand
+
+    def fortschritt(fertig: int, gesamt: int) -> None:
+        print(f"\r  {fertig}/{gesamt} Titel …", end="", file=sys.stderr, flush=True)
+
+    res = run_kern_scan(s, nur_watchlist=a.watchlist, demo=a.demo, offline=a.offline,
+                        progress=fortschritt, max_titel=a.max_titel)
+    schreibe_stand(s, res)
+    print(file=sys.stderr)
+    for h in res.hinweise:
+        print(f"  {h}", file=sys.stderr)
+
+    t = res.trichter
+    print(f"\nKern-Scan {res.as_of} ({res.quelle}) — {res.geprueft} geprüft, "
+          f"{res.vorgefiltert} vorgefiltert")
+    print(f"  bestanden: {t.get('bestanden', 0)} · ausgeschlossen: {t.get('ausgeschlossen', 0)}")
+    for nummer in range(1, 8):
+        n = t.get(f"kriterium_{nummer}", 0)
+        if n:
+            print(f"  an Kriterium {nummer} gescheitert: {n}")
+    if res.daten_fehlt:
+        print(f"  ohne Kennzahlen: {len(res.daten_fehlt)}")
+
+    if not res.bestanden:
+        print("\nKein Titel besteht den Katalog. Das ist ein gültiges Ergebnis, kein Fehler.")
+        return 0
+    print("\nBestanden (die offenen Kriterien beantwortest du beim Anlegen der These):")
+    for k in res.bestanden:
+        offen = f" · {len(k.ungeprueft)} offen" if k.ungeprueft else ""
+        print(f"  {k.symbol:<12} {k.name[:34]:<34} Soll {k.erfuellte_soll}"
+              f" · {k.jahre_abgedeckt} Jahre Daten{offen}")
+    print(f"\n  python -m satellit journal new --symbol <SYMBOL> --core --entry <Kurs> --stop 0")
+    return 0
+
+
 def cmd_portfolio(a, s: Settings) -> int:
     """Kern-Portfolio anzeigen oder einrichten."""
     if a.unterbefehl == "setup":
@@ -398,6 +435,15 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--skip-us-scripts", action="store_true", help="US-Skills nicht ausführen (letzten Stand nutzen)")
     w.add_argument("--no-push", action="store_true")
     w.set_defaults(func=cmd_weekly)
+
+    ks = sub.add_parser("kern-scan", help="Kern-Aktien gegen den Kriterienkatalog prüfen (KERN.md 6)")
+    ks.add_argument("--watchlist", action="store_true",
+                    help="nur die eigenen Titel aus state/kern_watchlist.yaml — in Sekunden statt Minuten")
+    ks.add_argument("--demo", action="store_true", help="synthetisches Universum + erfundene Kennzahlen")
+    ks.add_argument("--offline", action="store_true", help="nur aus dem Cache, ohne Netz")
+    ks.add_argument("--max", type=int, default=None, dest="max_titel",
+                    help="höchstens N Titel prüfen (zum Ausprobieren)")
+    ks.set_defaults(func=cmd_kern_scan)
 
     v = sub.add_parser("view", help="Ansicht (state/view_latest.json) ohne Netz neu bauen")
     v.set_defaults(func=cmd_view)

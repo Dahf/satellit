@@ -105,6 +105,7 @@ export function Einstellungen({ offenBei }: { offenBei?: Abschnitt }) {
         <Kontoblock senden={senden} laeuft={laeuft} />
         <TradeRepublicBlock />
         <Universumblock senden={senden} laeuft={laeuft} />
+        <Neueinrichtungblock senden={senden} laeuft={laeuft} />
 
         <div className="mt-8 border-t border-border pt-5">
           <form action="/api/logout" method="post">
@@ -113,6 +114,74 @@ export function Einstellungen({ offenBei }: { offenBei?: Abschnitt }) {
         </div>
       </aside>
     </div>
+  );
+}
+
+/**
+ * Die Einrichtung zurücksetzen.
+ *
+ * Steht bewusst ganz unten, hinter einer getippten Bestätigung und mit dem Satz, was genau
+ * passiert. Die Eröffnungsbuchungen werden storniert, nicht gelöscht — spätere Käufe,
+ * Sparplan-Ausführungen und Importe bleiben stehen. Ein Knopf, der ein Depot zurücksetzt,
+ * darf sich nicht wie „Speichern" anfühlen.
+ */
+function Neueinrichtungblock({ senden, laeuft }: {
+  senden: (a: string, b: Record<string, unknown>, w: string) => void;
+  laeuft: string | null;
+}) {
+  const [offen, setOffen] = useState(false);
+  const [wort, setWort] = useState("");
+  const bereit = wort.trim().toUpperCase() === "NEU EINRICHTEN";
+
+  return (
+    <Block
+      titel="Neu einrichten"
+      hinweis="Setzt die Einrichtung zurück, sodass das Onboarding wieder erscheint — für einen Fehlstart oder geänderte Beträge."
+    >
+      {!offen ? (
+        <Knopf onClick={() => setOffen(true)} laeuft={false} leise>
+          Einrichtung zurücksetzen …
+        </Knopf>
+      ) : (
+        <>
+          <ul className="mb-3 space-y-1 text-etikett leading-relaxed text-muted-foreground">
+            <li>· Die Eröffnungsbuchungen werden <strong>storniert</strong> (Gegenbuchung, nicht gelöscht).</li>
+            <li>· Satelliten-Kapital, Hochstand, Trockenlauf und Kill-Switch werden geleert.</li>
+            <li>· Spätere Käufe, Sparplan-Ausführungen und Importe bleiben stehen.</li>
+            <li>· Angelegte Thesen im Journal bleiben unberührt.</li>
+          </ul>
+          <label className="flex flex-col gap-1">
+            <span className="text-marginalie uppercase tracking-wider text-muted-foreground">
+              Tipp zur Bestätigung: NEU EINRICHTEN
+            </span>
+            <input
+              value={wort}
+              onChange={(e) => setWort(e.target.value)}
+              className="rounded-sm border border-input bg-background px-2 py-1.5 text-lauftext"
+            />
+          </label>
+          <div className="mt-3 flex items-center gap-3">
+            <Knopf
+              onClick={() => senden("portfolio.reset", {}, "Einrichtung")}
+              laeuft={laeuft === "Einrichtung"}
+              aus={!bereit}
+            >
+              Zurücksetzen
+            </Knopf>
+            <button
+              type="button"
+              onClick={() => {
+                setOffen(false);
+                setWort("");
+              }}
+              className="text-etikett text-muted-foreground underline"
+            >
+              Abbrechen
+            </button>
+          </div>
+        </>
+      )}
+    </Block>
   );
 }
 
@@ -369,17 +438,19 @@ function Block({ titel, hinweis, children }: { titel: string; hinweis: string; c
   );
 }
 
-function Knopf({ onClick, laeuft, leise, children }: {
+function Knopf({ onClick, laeuft, leise, aus, children }: {
   onClick: () => void;
   laeuft: boolean;
   leise?: boolean;
+  /** Gesperrt, weil eine Voraussetzung fehlt (etwa eine getippte Bestätigung). */
+  aus?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={laeuft}
+      disabled={laeuft || aus}
       className={
         leise
           ? "rounded-md border border-border px-3 py-1.5 text-etikett transition-colors hover:bg-muted disabled:opacity-40"

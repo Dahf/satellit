@@ -4,6 +4,7 @@ import { EntscheidungZeile } from "@/components/entscheidung-zeile";
 import { Einstellungen } from "@/components/einstellungen";
 import { Kopfzahlen } from "@/components/kopfzahlen";
 import { Aufteilung } from "@/components/aufteilung";
+import { KernKandidaten } from "@/components/kern-kandidaten";
 import { Onboarding } from "@/components/onboarding";
 import { cn, dateDe, eur, fmt, pct } from "@/lib/utils";
 
@@ -53,6 +54,12 @@ export default function Seite() {
             ))}
           </ul>
         </section>
+      )}
+
+      {/* Nur zeigen, wenn der Kern überhaupt Einzelaktien vorsieht — sonst ist der ganze
+          Abschnitt eine Antwort auf eine Frage, die sich nicht stellt. */}
+      {(v.etf?.anteil_kern ?? 1) < 1 && (
+        <KernKandidaten kandidaten={v.kern_kandidaten ?? []} scan={v.kern_scan ?? { gelaufen: false, watchlist: 0 }} />
       )}
 
       <Ausklapp titel="Warum wurde sonst nichts gekauft?" anzahl={v.abgelehnt.length}>

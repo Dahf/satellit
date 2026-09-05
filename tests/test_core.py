@@ -19,10 +19,10 @@ sys.path.insert(0, str(ROOT))
 
 from satellit import indicators as ind  # noqa: E402
 from satellit import journal, regime  # noqa: E402
-from satellit.config import Settings, load_settings  # noqa: E402
+from satellit.config import Settings, load_settings, risikoprofil  # noqa: E402
 from satellit.data import StooqSource, SyntheticSource, _clean  # noqa: E402
 from satellit.fx import FxTable  # noqa: E402
-from satellit.pipeline import Proposal, run_weekly, select_entries  # noqa: E402
+from satellit.pipeline import Proposal, mindestkapital, run_weekly, select_entries  # noqa: E402
 from satellit.screener import ScreenerContext, run_screener  # noqa: E402
 from satellit.universe import (  # noqa: E402
     Constituent, _download, apply_overrides, import_holdings, load_universe, parse_ishares_csv,
@@ -216,6 +216,84 @@ class TestSelection(unittest.TestCase):
         props, skipped = select_entries(settings, table, readings, [], acc, FxTable({}, "t"), {"US": 1.0}, blocked=True)
         self.assertEqual(props, [])
         self.assertEqual(skipped[0].code, "KILL_SWITCH")
+
+
+class TestKleineDepots(unittest.TestCase):
+    """Bei kleinem Kapital wird sonst wortlos ZU_TEUER gemeldet, ohne dass der Grund erscheint."""
+
+    def _tabelle(self, close=100.0, stop=94.0):
+        return pd.DataFrame([{"region": "US", "symbol": "S", "isin": "I", "name": "N", "sector": "Tech",
+                              "currency": "EUR", "close": close, "close_eur": close, "initial_stop": stop,
+                              "atr": 2.0, "breakout_level": close - 1, "rs_rank_pct": 0.01, "rs_score": 1.0,
+                              "candidate": True, "trend_ok": True, "rs_top": True, "liquidity_ok": True,
+                              "vol_ok": True}])
+
+    def _auswahl(self, settings, equity):
+        readings = {"US": regime.RegimeReading("d", "US", "GREEN", "GREEN")}
+        acc = journal.Account(satellite_equity_eur=equity, high_water_mark=equity)
+        return select_entries(settings, self._tabelle(), readings, [], acc, FxTable({}, "t"),
+                              {"US": 0.5}, blocked=False)
+
+    def _ganzstueck(self):
+        """Einstellungen ohne Bruchstücke — der Zustand, für den die Ganzstück-Regeln gelten."""
+        return load_settings(ROOT / "config" / "settings.yaml",
+                             overrides={"risk": {"bruchstuecke": False}})
+
+    def test_ohne_bruchstuecke_scheitert_der_kleine_satellit_an_der_stueckzahl(self):
+        """250 EUR bei 0,5 % Risiko ergeben 1,25 EUR — weniger als ein Stück zu 100 EUR."""
+        props, skipped = self._auswahl(self._ganzstueck(), 250.0)
+        self.assertEqual(props, [])
+        self.assertEqual(skipped[0].code, "ZU_TEUER")
+
+    def test_mit_den_regelwerten_kann_der_kleine_satellit_kaufen(self):
+        """Mit Bruchstücken (Vorgabe) entsteht eine Position, ohne dass das Risiko steigt."""
+        settings = load_settings(ROOT / "config" / "settings.yaml")
+        props, skipped = self._auswahl(settings, 250.0)
+        self.assertEqual(len(props), 1, [s.code for s in skipped])
+        self.assertAlmostEqual(props[0].risk_eur, 1.25, places=2)
+
+    def test_konzentrationsprofil_greift_nur_unterhalb_der_schwelle(self):
+        settings = load_settings(ROOT / "config" / "settings.yaml")
+        self.assertTrue(risikoprofil(settings, 250.0)["klein"])
+        self.assertFalse(risikoprofil(settings, 50_000.0)["klein"])
+        # Unterhalb der Schwelle: wenige, größere Positionen.
+        self.assertLess(risikoprofil(settings, 250.0)["max_positions"],
+                        risikoprofil(settings, 50_000.0)["max_positions"])
+        self.assertGreater(risikoprofil(settings, 250.0)["max_position_pct"],
+                           risikoprofil(settings, 50_000.0)["max_position_pct"])
+
+    def test_bruchstuecke_erzeugen_eine_position_statt_zu_teuer(self):
+        settings = load_settings(ROOT / "config" / "settings.yaml",
+                                 overrides={"risk": {"bruchstuecke": True, "min_order_eur": 1.0}})
+        props, skipped = self._auswahl(settings, 250.0)
+        self.assertEqual(len(props), 1, [s.code for s in skipped])
+        self.assertLess(props[0].shares, 1.0)                       # ein Bruchstück
+        self.assertAlmostEqual(props[0].risk_eur, 1.25, places=2)   # Risiko bleibt bei 0,5 %
+
+    def test_bruchstueck_unter_der_mindestorder_wird_benannt(self):
+        """Der Grund muss ein anderer sein als „zu teuer“ — sonst stimmt der Satz nicht."""
+        settings = load_settings(ROOT / "config" / "settings.yaml",
+                                 overrides={"risk": {"bruchstuecke": True, "min_order_eur": 500.0}})
+        props, skipped = self._auswahl(settings, 250.0)
+        self.assertEqual(props, [])
+        self.assertEqual(skipped[0].code, "UNTER_MINDESTORDER")
+
+    def test_mindestkapital_wird_gerechnet_und_verschwindet_wenn_es_reicht(self):
+        settings = self._ganzstueck()
+        fx = FxTable({}, "t")
+        schwelle = mindestkapital(settings, self._tabelle(), fx, risk_pct=0.5, equity_eur=250.0)
+        self.assertIsNotNone(schwelle)
+        self.assertGreater(schwelle, 250.0)
+        # Mit dieser Summe entsteht tatsächlich ein Vorschlag — die Zahl ist keine Zierde.
+        props, skipped = self._auswahl(settings, schwelle)
+        self.assertEqual(len(props), 1, [s.code for s in skipped])
+        # Und sie verstummt, sobald das Kapital reicht.
+        self.assertIsNone(mindestkapital(settings, self._tabelle(), fx, 0.5, equity_eur=schwelle))
+
+    def test_mit_bruchstuecken_gibt_es_keine_untergrenze_mehr(self):
+        """Die „zu klein"-Zeile darf nicht erscheinen, wenn gekauft werden kann."""
+        settings = load_settings(ROOT / "config" / "settings.yaml")
+        self.assertIsNone(mindestkapital(settings, self._tabelle(), FxTable({}, "t"), 0.5, 250.0))
 
 
 class TestJournalMath(unittest.TestCase):

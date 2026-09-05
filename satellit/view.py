@@ -18,11 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from . import portfolio
-from .config import Settings
+from .config import Settings, risikoprofil
 
 log = logging.getLogger(__name__)
 
-SCHEMA = 1
+SCHEMA = 2
 
 
 def _sauber(x: Any) -> Any:
@@ -96,8 +96,9 @@ def bauen(res, settings: Settings) -> dict:
             "cash_je_topf": kw.get("cash_je_topf") or {},
             "hoch_eur": acc.high_water_mark,
             "drawdown": acc.drawdown,
+            # Die wirksame Grenze, nicht der Regelwert: bei kleinem Satelliten gilt risk.klein.
             "positionen": {"offen": len(res.positions),
-                           "max": int(settings.get("risk.max_positions", 5))},
+                           "max": risikoprofil(settings, equity)["max_positions"]},
             "offenes_risiko_pct": res.open_risk_pct,
             "offenes_risiko_max_pct": float(settings.get("risk.max_open_risk_pct", 5.0)),
             "kern_eur": kw.get("kern_eur"),
@@ -118,7 +119,12 @@ def bauen(res, settings: Settings) -> dict:
         # es mountet ausschließlich state/. Danach ist der Katalog überflüssig.
         "etf_katalog": [] if (res.kern or {}).get("eingerichtet") else portfolio.lade_etf_katalog(settings),
         "ampel": {r: {**asdict(rd), "label": rd.label} for r, rd in res.readings.items()},
-        "entscheidungen": [asdict(d) for d in res.entscheidungen],
+        # Kern-Kandidaten kommen getrennt: sie sind kein Bestand und keine Aufgabe für den
+        # Montag, sondern eine Vorschlagsliste. In der Hauptliste landeten sie sonst unter
+        # „Dein Bestand" und behaupteten damit, du hieltest sie bereits.
+        "entscheidungen": [asdict(d) for d in res.entscheidungen if d.art != "kern_kandidat"],
+        "kern_kandidaten": [asdict(d) for d in res.entscheidungen if d.art == "kern_kandidat"],
+        "kern_scan": kern_scan_kopf(settings),
         "abgelehnt": [asdict(d) for d in res.abgelehnt],
         "screener_trichter": trichter,
         "sperren": {
@@ -137,6 +143,30 @@ def bauen(res, settings: Settings) -> dict:
         },
     }
     return _sauber(payload)
+
+
+def kern_scan_kopf(settings: Settings) -> dict:
+    """Datum, Umfang und Trichter des letzten Kern-Scans — ohne die Kandidaten selbst.
+
+    Das Alter gehört sichtbar dazu: der Scan läuft nicht wöchentlich mit, und eine
+    Kandidatenliste ohne Datum sähe aus, als wäre sie von heute.
+    """
+    from . import kern_scan
+
+    stand = kern_scan.lade_stand(settings)
+    if not stand:
+        return {"gelaufen": False, "watchlist": len(kern_scan.lade_watchlist(settings))}
+    return {
+        "gelaufen": True,
+        "as_of": stand.get("as_of"),
+        "quelle": stand.get("quelle"),
+        "geprueft": stand.get("geprueft", 0),
+        "vorgefiltert": stand.get("vorgefiltert", 0),
+        "trichter": stand.get("trichter") or {},
+        "hinweise": stand.get("hinweise") or [],
+        "demo": bool(stand.get("demo")),
+        "watchlist": len(kern_scan.lade_watchlist(settings)),
+    }
 
 
 def schreiben(payload: dict, settings: Settings) -> Path:

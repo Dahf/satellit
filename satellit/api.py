@@ -107,29 +107,114 @@ def _latest_screener_row(settings: Settings, symbol: str) -> dict:
     return {k: (None if isinstance(v, float) and v != v else v) for k, v in row.items()}
 
 
+def _latest_kern_row(settings: Settings, symbol: str) -> dict:
+    """Zeile aus dem letzten Kern-Scan. Kern-Titel stehen nicht zwingend im Screener-Universum,
+    und ohne diese Rückfallquelle scheiterte das Anlegen einer Kern-These an fehlendem Kurs."""
+    import pandas as pd
+
+    files = sorted(glob.glob(str(settings.reports_dir / "kern_*.csv")))
+    if not files:
+        return {}
+    try:
+        df = pd.read_csv(files[-1])
+    except Exception:  # noqa: BLE001
+        return {}
+    hit = df[df["symbol"].astype(str).str.upper() == symbol.upper()]
+    if hit.empty:
+        return {}
+    row = hit.iloc[0].to_dict()
+    return {k: (None if isinstance(v, float) and v != v else v) for k, v in row.items()}
+
+
+def _kern_ausschluss_ergaenzen(settings: Settings, symbol: str, isin: str, name: str) -> bool:
+    """ISIN/Symbol unter `core_holdings` in config/exclusions.yaml eintragen.
+
+    Scheitert das (Datei schreibgeschützt im Container), ist das kein Grund, die These zu
+    verwerfen — der Doppelhalten-Schutz fehlt dann, die These ist aber angelegt. Deshalb
+    Rückgabewert statt Ausnahme: der Aufrufer kann es melden.
+    """
+    import yaml
+
+    pfad = settings.path("exclusions_file")
+    try:
+        daten = yaml.safe_load(pfad.read_text(encoding="utf-8")) if pfad.exists() else {}
+        daten = daten if isinstance(daten, dict) else {}
+        gruppe = daten.setdefault("core_holdings", []) or []
+        for e in gruppe:
+            if isinstance(e, dict) and (
+                    (isin and str(e.get("isin", "")).upper() == isin.upper())
+                    or (symbol and str(e.get("symbol", "")).upper() == symbol.upper())):
+                return True
+        eintrag = {"note": f"Kern-Aktie {name} (automatisch beim Anlegen der These)"}
+        if isin:
+            eintrag["isin"] = isin
+        if symbol:
+            eintrag["symbol"] = symbol
+        gruppe.append(eintrag)
+        daten["core_holdings"] = gruppe
+        pfad.write_text(yaml.safe_dump(daten, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Ausschlussliste nicht schreibbar (%s) — %s bitte von Hand eintragen", exc, symbol)
+        return False
+
+
 def action_journal_new(settings: Settings, body: dict) -> dict:
     symbol = str(body.get("symbol", "")).strip().upper()
     if not symbol:
         raise ValueError("symbol fehlt")
     core = bool(body.get("core", False))
     row = _latest_screener_row(settings, symbol)
-    entry = body.get("entry", row.get("close"))
+    kern_row = _latest_kern_row(settings, symbol) if core else {}
+
+    # KERN.md 6, Kriterien 1 und 7 — die beiden, die kein Code beantworten kann. Ohne sie
+    # entsteht keine These, und ohne These kein Kauf (Trading-Plan 3.2).
+    kill: list[str] = []
+    statement = body.get("statement")
+    if core:
+        geschaeftsmodell = str(body.get("geschaeftsmodell") or "").strip()
+        kill = [str(body.get(f"kill_{i}") or "").strip() for i in (1, 2)]
+        kill = [k for k in kill if k] + [str(k).strip() for k in (body.get("kill_criteria") or [])]
+        if not geschaeftsmodell:
+            raise ValueError("Kriterium 1: Beschreib das Geschäftsmodell in zwei Sätzen — womit "
+                             "verdient das Unternehmen Geld, und warum kauft der Kunde dort?")
+        if len(kill) < 2:
+            raise ValueError("Kriterium 7: Zwei konkrete Kill-Kriterien sind Pflicht — Ereignisse, "
+                             "bei denen du verkaufst (Trading-Plan 3.2).")
+        statement = statement or f"{body.get('name') or symbol} ({symbol}): {geschaeftsmodell}"
+
+    entry = body.get("entry", kern_row.get("kurs_eur") or row.get("close"))
     stop = body.get("stop", 0.0 if core else row.get("initial_stop"))
+    if core and entry is None:
+        # Der Kurs ist bei einer Kern-These reine Dokumentation — es gibt keinen Stop und
+        # keine Positionsgröße, die davon abhinge. Er darf das Anlegen nicht verhindern.
+        entry = 0.0
     if entry is None or stop is None:
         raise ValueError("entry/stop fehlen (Symbol nicht im letzten Screener-Lauf)")
-    region = body.get("region") or row.get("region") or ("US" if "." not in symbol else "EU")
+    region = body.get("region") or row.get("region") or kern_row.get("region") or ("US" if "." not in symbol else "EU")
     currency = body.get("currency") or row.get("currency") or ("USD" if region == "US" else "EUR")
-    sector = body.get("sector") or row.get("sector") or "Unknown"
-    ampel = (regime.last_known(settings, region) or {}).get("effective")
+    sector = body.get("sector") or row.get("sector") or kern_row.get("sektor") or "Unknown"
+    isin = body.get("isin") or row.get("isin") or kern_row.get("isin") or ""
+    # Der Kern kennt keine Ampel (Trading-Plan 2) — sie würde in der These nur so aussehen,
+    # als hätte sie beim Kauf eine Rolle gespielt.
+    ampel = None if core else (regime.last_known(settings, region) or {}).get("effective")
     reports = sorted(glob.glob(str(settings.reports_dir / "weekly_*.md")))
     tid = journal.new_thesis(
-        settings, symbol=symbol, isin=body.get("isin") or row.get("isin") or "", name=body.get("name") or row.get("name") or symbol,
+        settings, symbol=symbol, isin=isin,
+        name=body.get("name") or row.get("name") or kern_row.get("name") or symbol,
         region=region, currency=currency, sector=sector, entry=float(entry), stop=float(stop),
         breakout_level=row.get("breakout_level"), rs_rank_pct=row.get("rs_rank_pct"), ampel=ampel,
-        report_file=os.path.basename(reports[-1]) if reports else "dashboard", statement=body.get("statement"),
+        report_file=os.path.basename(reports[-1]) if reports else "dashboard", statement=statement,
         setup_type="core_holding" if core else "trendfolge_20w", review_days=180 if core else 7,
+        kill_criteria=kill or None,
     )
     out = {"thesis_id": tid, "symbol": symbol, "entry": float(entry), "stop": float(stop), "ampel": ampel}
+    if core:
+        # KERN.md 6, Ablauf Schritt 3: die ISIN gehört in die Ausschlussliste, damit der
+        # Screener den Titel nicht zusätzlich im Satelliten vorschlägt (Regel 3.5, kein
+        # Doppelhalten). Bisher war das ein Handgriff, den nichts erzwang und nichts prüfte.
+        out["ausgeschlossen"] = _kern_ausschluss_ergaenzen(settings, symbol, isin,
+                                                           body.get("name") or symbol)
     acc = journal.Account.load(settings)
     if not core and acc.satellite_equity_eur:
         try:
@@ -209,8 +294,79 @@ def action_ledger_add(settings: Settings, body: dict) -> dict:
     )
     if date.fromisoformat(b.datum) > date.today():
         raise ValueError("Das Datum liegt in der Zukunft.")
+    if b.topf == "kern_aktie" and b.betrag_eur > 0:
+        # Trading-Plan 3.3 und KERN.md 1: höchstens 5 % je Titel, höchstens 20 % des Kerns in
+        # Einzelaktien. Die Prüfung existierte seit Langem als portfolio.kern_grenze_ok, wurde
+        # aber von nirgendwo aufgerufen — CHANGELOG_REGELN behauptete trotzdem, das Dashboard
+        # erzwinge die Grenzen. Hier wird das eingelöst.
+        z = portfolio.zusammenfassung(settings)
+        ok, grund = portfolio.kern_grenze_ok(z["werte"], settings, b.isin, b.betrag_eur)
+        if not ok:
+            raise ValueError(grund)
+        if not b.thesis_id and not _hat_kern_these(settings, b.symbol, b.isin):
+            raise ValueError("Vor dem Kauf braucht jede Kern-Aktie eine schriftliche These mit "
+                             "Kill-Kriterien (Trading-Plan 3.2). Lege sie zuerst an.")
     portfolio.schreibe_buchung(settings, b)
     return {"gebucht": b.quelle_id, "typ": b.typ, "topf": b.topf, "betrag_eur": b.betrag_eur}
+
+
+def _hat_kern_these(settings: Settings, symbol: str, isin: str) -> bool:
+    """„Ohne These kein Kauf" (Trading-Plan 3.2) — hier durchgesetzt statt nur behauptet."""
+    symbol, isin = (symbol or "").upper(), (isin or "").upper()
+    for these in journal.core_positions(settings):
+        prov = (these.get("origin") or {}).get("raw_provenance") or {}
+        kandidaten = {str(prov.get("symbol") or "").upper(), str(these.get("ticker") or "").upper(),
+                      str(prov.get("isin") or "").upper()}
+        if (symbol and symbol in kandidaten) or (isin and isin in kandidaten):
+            return True
+    return False
+
+
+def action_kern_watchlist(settings: Settings, body: dict) -> dict:
+    """Eigene Kern-Kandidaten pflegen. `entfernen=true` nimmt einen Titel wieder heraus."""
+    from . import kern_scan
+
+    symbol = str(body.get("symbol") or "").strip().upper()
+    if body.get("entfernen"):
+        return {"titel": kern_scan.watchlist_entfernen(settings, symbol)}
+    return {"titel": kern_scan.watchlist_ergaenzen(
+        settings, symbol, name=str(body.get("name") or ""), isin=str(body.get("isin") or ""),
+        notiz=str(body.get("notiz") or ""))}
+
+
+def action_kern_scan(settings: Settings, body: dict) -> dict:
+    """Kern-Kandidaten prüfen.
+
+    Der volle Universumslauf ruft je Titel Jahresabschlüsse ab und dauert Minuten bis
+    Viertelstunden — deshalb läuft er wie der Wochenlauf im Hintergrund und nicht in der
+    Anfrage. `nur_watchlist=true` prüft nur die eigenen Titel und ist in Sekunden fertig.
+    """
+    from . import kern_scan as ks_modul
+
+    nur_watchlist = bool(body.get("nur_watchlist", False))
+    if not nur_watchlist:
+        if _RUN_LOCK.locked():
+            raise ValueError("Es läuft bereits ein Lauf. Bitte abwarten.")
+        threading.Thread(target=_kern_scan_job, args=(settings,), daemon=True).start()
+        return {"gestartet": True, "umfang": "universum"}
+    res = ks_modul.run_kern_scan(settings, nur_watchlist=True)
+    ks_modul.schreibe_stand(settings, res)
+    return {"gestartet": False, "umfang": "watchlist", "geprueft": res.geprueft,
+            "bestanden": len(res.bestanden), "trichter": res.trichter}
+
+
+def _kern_scan_job(settings: Settings) -> None:
+    from . import kern_scan as ks_modul
+
+    with _RUN_LOCK:
+        try:
+            res = ks_modul.run_kern_scan(settings)
+            ks_modul.schreibe_stand(settings, res)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Kern-Scan fehlgeschlagen: %s", exc)
+        else:
+            log.info("Kern-Scan fertig: %d geprüft, %d bestanden", res.geprueft, len(res.bestanden))
+    ansicht_auffrischen(settings)
 
 
 def action_ledger_storno(settings: Settings, body: dict) -> dict:
@@ -238,6 +394,16 @@ def action_depot_abgleich(settings: Settings, body: dict) -> dict:
     plan.depotwert_abgleich = {"datum": heute, "wert_eur": ist}
     portfolio.speichere_plan(settings, plan)
     return {"gerechnet_eur": soll, "app_eur": ist, "differenz_eur": diff}
+
+
+def action_portfolio_katalog(settings: Settings, body: dict) -> dict:
+    """ETF-Auswahlliste direkt liefern.
+
+    Das Onboarding bekommt den Katalog sonst nur über state/view_latest.json — und genau
+    dort ist er veraltet, solange kein Lauf stattgefunden hat. Im Onboarding gibt es aber
+    noch keine Aktion, die eine Auffrischung auslösen könnte. Also holt es ihn direkt.
+    """
+    return {"etfs": portfolio.lade_etf_katalog(settings)}
 
 
 def action_portfolio_setup(settings: Settings, body: dict) -> dict:
@@ -276,13 +442,62 @@ def action_portfolio_setup(settings: Settings, body: dict) -> dict:
     )
     portfolio.speichere_plan(settings, plan)
     n = portfolio.schreibe_buchungen(settings, portfolio.startbetrag_buchungen(plan, heute))
-    # Trading-Plan 10.1: mindestens zwei Wochenenden Trockenlauf, bevor Orders zulässig sind.
+    # Trading-Plan 10.1: Vorgabe sind zwei Wochenenden Trockenlauf, bevor Orders zulässig sind.
+    # Abwählbar, weil es eine Datenprüfung ist und keine Marktregel — wer die erste Ampel-
+    # Auswertung von Hand gegenliest, braucht die Frist nicht. Der Kern ist ohnehin nie gesperrt.
+    tage = int(body.get("trockenlauf_tage", settings.get("start.trockenlauf_tage", 14)))
+    if tage < 0:
+        raise ValueError("Der Trockenlauf kann nicht negativ sein.")
     acc = journal.Account.load(settings)
-    acc.dry_run_until = (heute + timedelta(days=14)).isoformat()
+    acc.dry_run_until = (heute + timedelta(days=tage)).isoformat() if tage > 0 else None
     acc.set_equity(round(start - kern, 2), heute)
     acc.save(settings)
     return {"etf": etf["name"], "kern_eur": kern, "satellit_eur": round(start - kern, 2),
             "buchungen": n, "trockenlauf_bis": acc.dry_run_until}
+
+
+def action_portfolio_reset(settings: Settings, body: dict) -> dict:
+    """Die Einrichtung rückgängig machen, damit das Onboarding erneut läuft.
+
+    Nicht gelöscht, sondern storniert: das Kassenbuch kennt nur Gegenbuchungen, und die
+    Historie bleibt nachvollziehbar (portfolio.storniere). Betroffen sind ausschließlich die
+    Eröffnungsbuchungen der Einrichtung — spätere Käufe, Sparplan-Ausführungen und Importe
+    bleiben unangetastet, sonst würde ein „Neu einrichten" stillschweigend Geschichte tilgen.
+
+    Offene Satelliten-Positionen blockieren den Reset: Kapital und Journal liefen danach
+    auseinander, und der Kill-Switch misst gegen einen Hochstand, den es nicht mehr gibt.
+    `force=true` überstimmt das ausdrücklich.
+    """
+    offen = journal.open_positions(settings)
+    if offen and not body.get("force"):
+        symbole = ", ".join(sorted(journal.provenance(t).get("symbol") or t.get("ticker", "?")
+                                   for t in offen))
+        raise ValueError(f"Es sind noch {len(offen)} Satelliten-Positionen offen ({symbole}). "
+                         f"Schließ sie zuerst im Journal — sonst rechnet das System danach mit "
+                         f"Kapital, das im Journal noch gebunden ist.")
+
+    buchungen = portfolio.lies_ledger(settings)
+    wirksam = {b.quelle_id for b in portfolio._wirksame(buchungen)}
+    storniert = 0
+    for b in buchungen:
+        if b.quelle_id in wirksam and str(b.notiz or "").startswith("Startbetrag"):
+            portfolio.storniere(settings, b.quelle_id, "Einrichtung zurückgesetzt")
+            storniert += 1
+
+    plan = portfolio.lade_plan(settings)
+    plan.onboarding_erledigt = False
+    plan.startbetrag = {}
+    portfolio.speichere_plan(settings, plan)
+
+    acc = journal.Account.load(settings)
+    acc.satellite_equity_eur = None
+    acc.high_water_mark = None
+    acc.dry_run_until = None
+    acc.kill_switch_active = False
+    acc.kill_switch_reason = ""
+    acc.save(settings)
+    return {"storniert": storniert, "offene_positionen": len(offen),
+            "hinweis": "Beim nächsten Laden erscheint wieder die Einrichtung."}
 
 
 def action_portfolio_import(settings: Settings, body: dict) -> dict:
@@ -317,7 +532,11 @@ ACTIONS = {
     "/ledger/storno": action_ledger_storno,
     "/depot/abgleich": action_depot_abgleich,
     "/portfolio/setup": action_portfolio_setup,
+    "/portfolio/katalog": action_portfolio_katalog,
     "/portfolio/import": action_portfolio_import,
+    "/portfolio/reset": action_portfolio_reset,
+    "/kern/scan": action_kern_scan,
+    "/kern/watchlist": action_kern_watchlist,
 }
 
 

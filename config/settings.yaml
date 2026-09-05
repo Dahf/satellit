@@ -2,6 +2,11 @@
 # Weichen Dokument und Datei voneinander ab, gilt das Dokument.
 # Änderungen nur nach Abschnitt 12 des Trading-Plans (Monats-/Jahresreview, Changelog).
 
+start:
+  # Trading-Plan 10.1. Vorgabe sind zwei Wochenenden; beim Einrichten abwählbar (0 = kein
+  # Trockenlauf). Betrifft ausschließlich den Satelliten — der Kern startet immer sofort.
+  trockenlauf_tage: 14
+
 portfolio:
   core_share: 0.90
   satellite_share: 0.10
@@ -59,6 +64,27 @@ data:
   max_stale_days: 5                # älter -> Warnung im Bericht
   fixture_dir: null                # nur für Tests/Demo
 
+fundamentals:
+  # Kennzahlen für den Kern-Kriterienkatalog (KERN.md 6). Nur dort verwendet — der Satellit
+  # kennt keine Fundamentaldaten.
+  primary: yfinance                # yfinance | synthetic | fixture | cache
+  refresh_days: 90                 # Abschlüsse ändern sich quartalsweise; passt zum Kauffenster
+  pause_seconds: 0.6               # je Titel ein eigener Abruf, es gibt keinen Batch-Endpunkt
+  fixture_dir: null                # nur für Tests
+  cache_dir: state/fundamentals
+
+kern:
+  # Schwellen des Kriterienkatalogs aus docs/KERN.md 6. Der Katalog ist ein Filter, kein
+  # Score: ein Titel muss alle Muss-Kriterien erfüllen.
+  min_roic: 0.10                   # Kriterium 3: ROIC/ROE nachhaltig > 10 %
+  roic_jahre: 5                    # 5-Jahres-Durchschnitt
+  max_net_debt_ebitda: 2.5         # Kriterium 4
+  fcf_fenster: 10                  # Kriterium 5: positiv in mindestens 8 von 10 Jahren
+  fcf_mindestens: 8
+  min_jahre_notiert: 5             # Kriterium 6
+  min_marktkap_eur: 5000000000     # Kriterium 6: > 5 Mrd. EUR
+  wachstum_jahre: 5                # Kriterium 2: Umsatz und EPS über 5-10 Jahre gestiegen
+
 signal:
   sma_fast: 50
   sma_slow: 200
@@ -85,6 +111,35 @@ risk:
   atr_stop_mult: 3.0
   soft_exit_weeks: 10
   yellow_risk_factor: 0.5
+
+  # Bruchstücke. Der floor() in der Stückzahl und der Filter universe.max_price_pct_of_target
+  # existieren nur, weil man ganze Aktien kaufen muss — mit Bruchstücken sind beide
+  # gegenstandslos, und das Risiko je Trade bleibt exakt bei risk_pct. Trade Republic handelt
+  # Bruchstücke auch bei Einmalorders (0,5 Anteile sind möglich), deshalb an.
+  #
+  # Offene Frage, die der Depotinhaber klären muss: ob sich auf eine Bruchstück-Position eine
+  # ruhende Stop-Market-Order legen lässt (Anhang A: 360 Tage Gültigkeit). Geht das nicht,
+  # wird der Stop nur im Wochenlauf geprüft und die Position ist zwischen zwei Läufen
+  # ungesichert. Bei den Positionsgrößen, um die es hier geht, sind das Beträge im
+  # einstelligen Euro-Bereich — die Regel bleibt trotzdem die Regel, und das Urteil weist
+  # bei Bruchstücken ausdrücklich darauf hin.
+  bruchstuecke: true
+
+  # Kleinste sinnvolle Order. Keine Broker-Vorschrift, sondern eine Untergrenze gegen Unsinn:
+  # ohne sie schlägt der Screener bei sehr kleinem Kapital Positionen von wenigen Cent vor,
+  # die niemand ausführt. 1 EUR entspricht der Größenordnung, ab der Trade Republic
+  # Bruchstücke bildet.
+  min_order_eur: 1.0
+
+  # Konzentrationsprofil für kleine Satelliten: wenige, größere Positionen statt fünf
+  # unmöglich kleiner. Greift nur unterhalb der Schwelle; wächst der Satellit darüber
+  # hinaus, gelten wieder die Werte oben. max_open_risk_pct bleibt in beiden Fällen
+  # unverändert — das ist die Bremse gegen das höhere Klumpenrisiko.
+  kleines_depot_unter_eur: 2000
+  klein:
+    max_positions: 2
+    max_position_pct: 50
+    max_per_sector: 1
 
 regime:
   us:

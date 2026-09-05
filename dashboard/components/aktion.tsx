@@ -38,7 +38,11 @@ export function Aktion({ spec, gesperrt, ton }: {
     setFehler(null);
     const body: Record<string, unknown> = { ...spec!.body };
     for (const f of spec!.felder) {
-      const roh = (werte[f.name] ?? "").trim().replace(",", ".");
+      const zahl = f.typ === "dezimal" || f.typ === "ganzzahl";
+      // Das Dezimalkomma nur bei Zahlen ersetzen. Zuvor lief das über jeden Wert und machte
+      // aus „Software, weil …" ein „Software. weil …" — in einer schriftlichen These, die
+      // drei Jahre halten soll, ist das kein Schönheitsfehler.
+      const roh = zahl ? (werte[f.name] ?? "").trim().replace(",", ".") : (werte[f.name] ?? "").trim();
       if (!roh) {
         if (f.pflicht) {
           setFehler(`${f.label} fehlt.`);
@@ -47,7 +51,7 @@ export function Aktion({ spec, gesperrt, ton }: {
         }
         continue;
       }
-      body[f.name] = f.typ === "dezimal" || f.typ === "ganzzahl" ? Number(roh) : roh;
+      body[f.name] = zahl ? Number(roh) : roh;
     }
     try {
       const antwort = await fetch("/api/action", {
@@ -97,18 +101,51 @@ export function Aktion({ spec, gesperrt, ton }: {
   return (
     <div className="w-full rounded-md border border-border bg-muted/40 p-3">
       <div className="flex flex-wrap gap-3">
-        {spec.felder.map((f) => (
-          <label key={f.name} className="flex min-w-[8rem] flex-1 flex-col gap-1">
-            <span className="text-marginalie uppercase tracking-wider text-muted-foreground">{f.label}</span>
-            <input
-              type={f.typ === "datum" ? "date" : "text"}
-              inputMode={f.typ === "dezimal" || f.typ === "ganzzahl" ? "decimal" : undefined}
-              value={werte[f.name] ?? ""}
-              onChange={(e) => setWerte((w) => ({ ...w, [f.name]: e.target.value }))}
-              className="zahl rounded-sm border border-input bg-card px-2 py-1.5 text-lauftext focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            />
-          </label>
-        ))}
+        {spec.felder.map((f) => {
+          const zahl = f.typ === "dezimal" || f.typ === "ganzzahl";
+          const setzen = (v: string) => setWerte((w) => ({ ...w, [f.name]: v }));
+          // Zahlenschrift nur für Zahlen: Fließtext in tabellarischen Ziffern liest sich schlecht.
+          const rahmen =
+            "rounded-sm border border-input bg-card px-2 py-1.5 text-lauftext focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+          return (
+            <label
+              key={f.name}
+              className={cn("flex flex-col gap-1", f.typ === "mehrzeilig" ? "w-full" : "min-w-[8rem] flex-1")}
+            >
+              <span className="text-marginalie uppercase tracking-wider text-muted-foreground">
+                {f.label}
+                {f.pflicht && <span className="ml-1 text-verkauf" aria-label="Pflichtfeld">*</span>}
+              </span>
+              {f.auswahl && f.auswahl.length > 0 ? (
+                <select value={werte[f.name] ?? ""} onChange={(e) => setzen(e.target.value)} className={rahmen}>
+                  {f.auswahl.map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+                </select>
+              ) : f.typ === "mehrzeilig" ? (
+                <textarea
+                  rows={2}
+                  value={werte[f.name] ?? ""}
+                  onChange={(e) => setzen(e.target.value)}
+                  className={cn(rahmen, "resize-y leading-relaxed")}
+                />
+              ) : (
+                <input
+                  type={f.typ === "datum" ? "date" : "text"}
+                  inputMode={zahl ? "decimal" : undefined}
+                  value={werte[f.name] ?? ""}
+                  onChange={(e) => setzen(e.target.value)}
+                  className={cn(rahmen, zahl && "zahl")}
+                />
+              )}
+              {f.hinweis && (
+                <span className="text-marginalie leading-snug text-muted-foreground">{f.hinweis}</span>
+              )}
+            </label>
+          );
+        })}
       </div>
 
       {spec.bestaetigung && (

@@ -114,6 +114,18 @@ Alle Prozentwerte beziehen sich auf das **aktuelle Satelliten-Kapital** (Cash + 
 
 **Initialstop:** Einstiegskurs − 3 × ATR(20 Tage). Wird vor der Order berechnet, im Journal notiert und **am Montag als Stop-Market-Order (Gültigkeit 360 Tage) bei Trade Republic eingestellt.**
 
+### 6.1 Kleine Satelliten
+
+Unterhalb von `risk.kleines_depot_unter_eur` (Vorgabe 2.000 €) sind fünf Positionen à 25 % rechnerisch nicht darstellbar: Risiko je Trade geteilt durch Stopabstand ergibt weniger als ein ganzes Stück, und der Screener lehnt jeden Titel als „zu teuer“ ab. Dann gelten die Werte aus `risk.klein` — **höchstens 2 Positionen, bis 50 % je Position, 1 je Sektor**. Wenige, größere Positionen statt fünf unmöglich kleiner.
+
+Was dabei **unverändert** bleibt: das Risiko je Trade (1,0 % bzw. 0,5 % in der Startphase) und das **maximale offene Gesamtrisiko von 5 %**. Letzteres ist die Bremse gegen das höhere Klumpenrisiko der Konzentration. Wächst der Satellit über die Schwelle, gelten wieder die Werte aus der Tabelle oben — ohne Zutun.
+
+Reicht auch das nicht, sagt das System die nötige Summe. Es rechnet sie gegen die tatsächlichen Kurse und Stopabstände des Universums, statt sie zu schätzen.
+
+**Bruchstücke (`risk.bruchstuecke`, an):** Die Abrundung auf ganze Stücke und der Filter `universe.max_price_pct_of_target` existieren nur, weil ganze Aktien gekauft werden müssen — Trade Republic handelt Bruchstücke auch bei Einmalorders, damit sind beide gegenstandslos. Das Risiko je Trade ändert sich dadurch nicht: bei 250 € Satellit und 0,5 % bleibt es 1,25 €, die Position wird nur nicht mehr auf 0 Stück abgerundet. Untergrenze ist stattdessen `risk.min_order_eur` (1 €) — keine Broker-Vorschrift, sondern eine Schranke gegen Vorschläge von wenigen Cent.
+
+**Offener Punkt:** Ob sich auf eine Bruchstück-Position eine ruhende Stop-Market-Order legen lässt, ist zu prüfen. Geht das nicht, wird der Stop erst im nächsten Wochenlauf ausgewertet und die Position ist dazwischen nicht durch eine Order gesichert. Das Urteil weist bei jedem Bruchstück darauf hin. Bei Positionsgrößen um 20 € geht es dabei um wenige Euro — die Regel bleibt trotzdem die Regel.
+
 ---
 
 ## 7. Satellit — Exits
@@ -181,7 +193,7 @@ Fällt der Sonntags-Slot aus, werden **keine neuen Einstiege** gemacht. Stop-Nac
 ## 10. Start- und Abbruchregeln
 
 ### 10.1 Start
-1. **Trockenlauf:** Die Pipeline läuft mindestens **2 Wochenenden** nur mit Bericht, ohne Orders. Ziel: Datenfehler, falsche Ticker-Zuordnungen, Ampel-Plausibilität prüfen.
+1. **Trockenlauf:** Die Pipeline läuft **2 Wochenenden** nur mit Bericht, ohne Orders. Ziel: Datenfehler, falsche Ticker-Zuordnungen, Ampel-Plausibilität prüfen. Das ist eine **Datenprüfung, keine Marktregel** — sie betrifft ausschließlich den Satelliten und ist beim Einrichten abwählbar (`config/settings.yaml`, `start.trockenlauf_tage`). Wer sie abwählt, liest die erste Ampel-Auswertung selbst gegen. Unabhängig davon hält die Ampel-Hysterese die ersten zwei Läufe auf ROT und damit auf 0 Einstiegen.
 2. **Halbes Risiko:** Die ersten **20 abgeschlossenen Trades** mit 0,5 % Risiko pro Trade. Danach 1,0 % — sofern der Kill-Switch nicht ausgelöst ist.
 3. Kern-Sparplan startet sofort, unabhängig vom Satelliten.
 
@@ -261,13 +273,13 @@ Danach: bestehende Positionen laufen nach Abschnitt 7 aus. Vor einem Neustart: s
 | Initialstop | Einstieg − 3 × ATR(20) |
 | Trailing | max(alter Stop, Close − 3 × ATR(20)), wöchentlich |
 | Weicher Exit | Freitagsschluss < SMA(10 Wochen) |
-| Max. Position / Anzahl / Sektor | 25 % / 5 / 2 |
+| Max. Position / Anzahl / Sektor | 25 % / 5 / 2 · unter 2.000 € Satellit: 50 % / 2 / 1 (6.1) |
 | Max. offenes Gesamtrisiko | 5 % |
 | Ampel USA | Grün ≥ 60, Gelb 40–59, Rot < 40; Veto Breadth < 40 → eine Stufe runter |
 | Ampel EU | Grün: P200 ≥ 55 % ∧ IDX > SMA200 · Rot: P200 < 40 % ∨ (IDX < SMA200 ∧ P50 < 40 %) |
 | Hysterese | Herabstufung sofort, Heraufstufung nach 2 Wochen |
 | Kill-Switch | DD ≥ 25 % oder Expectancy ≤ 0 nach 30 Trades |
-| Trockenlauf | ≥ 2 Wochenenden |
+| Trockenlauf | 2 Wochenenden (Vorgabe), beim Einrichten abwählbar |
 | Order-Limit Einstieg | letzter Kurs + 1 %, tagesgültig |
 | Stop-Order | Stop-Market, 360 Tage |
 

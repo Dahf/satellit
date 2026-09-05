@@ -34,6 +34,7 @@ class ScreenerContext:
     satellite_equity_eur: float | None      # None -> Preisfilter wird übersprungen
     risk_pct: float                         # effektives Risiko je Trade in %
     as_of: date
+    profil: dict | None = None              # config.risikoprofil(); None -> Regelwerte
 
 
 def evaluate_symbol(c: Constituent, df: pd.DataFrame, settings: Settings, fx: FxTable,
@@ -97,14 +98,24 @@ def evaluate_symbol(c: Constituent, df: pd.DataFrame, settings: Settings, fx: Fx
 
     # Zielposition (EUR) aus Risiko und Stopabstand, gedeckelt auf max_position_pct
     if ctx.satellite_equity_eur and np.isfinite(row["initial_stop"]) and last > row["initial_stop"]:
+        profil = ctx.profil or {}
+        bruchstuecke = bool(profil.get("bruchstuecke", settings.get("risk.bruchstuecke", False)))
         risk_eur = ctx.satellite_equity_eur * ctx.risk_pct / 100.0
         stop_dist_eur = fx.to_eur(last - row["initial_stop"], c.currency)
-        shares = math.floor(risk_eur / stop_dist_eur) if stop_dist_eur > 0 else 0
-        max_value = ctx.satellite_equity_eur * float(settings.get("risk.max_position_pct", 25)) / 100.0
+        roh = risk_eur / stop_dist_eur if stop_dist_eur > 0 else 0.0
+        shares = roh if bruchstuecke else math.floor(roh)
+        max_pct = float(profil.get("max_position_pct", settings.get("risk.max_position_pct", 25)))
+        max_value = ctx.satellite_equity_eur * max_pct / 100.0
         target = min(shares * row["close_eur"], max_value)
         row["target_value_eur"] = target
-        max_price_pct = float(settings.get("universe.max_price_pct_of_target", 0.40))
-        row["price_ok"] = bool(target > 0 and row["close_eur"] <= max_price_pct * target)
+        if bruchstuecke:
+            # Der Filter fragt „passt eine ganze Aktie in die Zielposition?“ — mit Bruchstücken
+            # ist das gegenstandslos. Stattdessen zählt nur, ob die Order überhaupt lohnt.
+            row["price_ok"] = bool(target >= float(profil.get("min_order_eur",
+                                                              settings.get("risk.min_order_eur", 1.0))))
+        else:
+            max_price_pct = float(settings.get("universe.max_price_pct_of_target", 0.40))
+            row["price_ok"] = bool(target > 0 and row["close_eur"] <= max_price_pct * target)
     return row
 
 

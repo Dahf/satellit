@@ -14,7 +14,7 @@ import pandas as pd
 from . import decisions as dec
 from . import indicators as ind
 from . import journal, portfolio, regime
-from .config import Settings
+from .config import Settings, risikoprofil
 from .decisions import Decision, Kontext, SkipInfo
 from .data import NullSource, PriceSource, SyntheticSource, build_source, update_prices
 from .fx import FxTable, load_fx
@@ -65,7 +65,7 @@ class Proposal:
     initial_stop: float
     atr: float
     rs_rank_pct: float
-    shares: int
+    shares: float          # Bruchstücke möglich (risk.bruchstuecke), sonst ganzzahlig
     value_eur: float
     risk_eur: float
     risk_pct: float
@@ -273,6 +273,19 @@ def _kern_kontext(settings: Settings, ctx: Kontext, frames: dict[str, pd.DataFra
     }
     ctx.kern_thesen = thesen
     ctx.depot_abgleich_faellig = abgleich_faellig
+    # Kandidaten kommen aus dem letzten Kern-Scan, der eigenständig und selten läuft. Der
+    # Wochenlauf löst ihn nicht aus: er würde je Titel Jahresabschlüsse abrufen und damit
+    # Minuten kosten, um eine Frage zu beantworten, die viermal im Jahr gestellt wird.
+    from . import kern_scan
+
+    kandidaten, kopf = kern_scan.kandidaten_aus_stand(settings)
+    # Nur Titel ohne bestehende These — was schon im Depot liegt, ist Bestand, kein Kandidat.
+    schon_da = set()
+    for these, _wert, _faellig in thesen:
+        prov = (these.get("origin") or {}).get("raw_provenance") or {}
+        schon_da.add(str(prov.get("symbol") or these.get("ticker") or "").upper())
+    ctx.kern_kandidaten = [k for k in kandidaten if k.symbol.upper() not in schon_da]
+    ctx.kern_scan_stand = kopf.get("as_of")
 
 
 def _firmenname(t: dict, symbol: str) -> str:
@@ -309,6 +322,52 @@ def _wochenpunkte(df: pd.DataFrame, soft_weeks: int, anzahl: int = 60) -> list[d
     return punkte
 
 
+def mindestkapital(settings: Settings, table: pd.DataFrame, fx: FxTable, risk_pct: float,
+                   equity_eur: float | None) -> float | None:
+    """Wie viel Satelliten-Kapital braucht es, damit überhaupt ein Titel kaufbar wäre?
+
+    Gibt None zurück, sobald das vorhandene Kapital reicht — die Zahl ist nur interessant,
+    wenn sie eine Sperre erklärt. Sonst der kleinste Betrag, mit dem mindestens ein Titel
+    des aktuellen Universums alle Größenfilter passiert.
+
+    Ohne diese Rechnung meldet der Screener wochenlang nur ZU_TEUER, und der Grund — das
+    Depot ist schlicht zu klein — steht nirgends. Geraten wird nichts: gerechnet wird gegen
+    die tatsächlichen Kurse und Stopabstände des Universums.
+
+    Zur Drei im Ganzstück-Fall: der Preisfilter verlangt Kurs <= 40 % der Zielposition. Bei
+    einem Stück wäre die Zielposition genau ein Kurs, die Bedingung also nie erfüllbar; erst
+    ab drei Stück geht die Ungleichung auf.
+    """
+    if table.empty or risk_pct <= 0:
+        return None
+    profil = risikoprofil(settings, equity_eur)
+    max_pct = profil["max_position_pct"]
+    # Titel, die nur noch an der Größe scheitern könnten — Trend, RS, Liquidität, Volatilität
+    # sind Eigenschaften des Titels und ändern sich nicht dadurch, dass mehr Geld da ist.
+    brauchbar = table[table["trend_ok"] & table["rs_top"] & table["liquidity_ok"] & table["vol_ok"]]
+    noetig: list[float] = []
+    for _, r in brauchbar.iterrows():
+        close_eur = r["close_eur"]
+        if not (pd.notna(close_eur) and close_eur > 0 and pd.notna(r["initial_stop"])):
+            continue
+        stop_dist_eur = fx.to_eur(float(r["close"] - r["initial_stop"]), r["currency"])
+        if not (stop_dist_eur > 0):
+            continue
+        if profil["bruchstuecke"]:
+            # Es genügt, die Mindestordergröße zu erreichen.
+            noetig.append(profil["min_order_eur"] * 100.0 / max_pct)
+        else:
+            aus_risiko = 3.0 * stop_dist_eur * 100.0 / risk_pct
+            aus_deckel = 3.0 * float(close_eur) * 100.0 / max_pct
+            noetig.append(max(aus_risiko, aus_deckel))
+    if not noetig:
+        return None
+    schwelle = min(noetig)
+    if equity_eur and equity_eur >= schwelle:
+        return None
+    return round(schwelle, 2)
+
+
 # ---------------------------------------------------------------------- selection
 def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, regime.RegimeReading],
                    positions: list[PositionView], account: journal.Account, fx: FxTable,
@@ -335,10 +394,11 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
         skipped.append(SkipInfo(symbol="", code="KILL_SWITCH"))
         return proposals, skipped
 
-    max_positions = int(settings.get("risk.max_positions", 5))
-    max_sector = int(settings.get("risk.max_per_sector", 2))
+    profil = risikoprofil(settings, equity)
+    max_positions = profil["max_positions"]
+    max_sector = profil["max_per_sector"]
     max_open_risk = float(settings.get("risk.max_open_risk_pct", 5.0)) / 100.0 * equity
-    max_value = float(settings.get("risk.max_position_pct", 25)) / 100.0 * equity
+    max_value = profil["max_position_pct"] / 100.0 * equity
     limits = settings.get("signal.max_new_entries", {"GREEN": 2, "YELLOW": 1, "RED": 0})
 
     n_open = len(positions)
@@ -377,12 +437,22 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
         if not (stop_dist_eur > 0):
             skipped.append(_skip(r, "STOP_UNGUELTIG"))
             continue
-        shares = math.floor(risk_eur / stop_dist_eur)
         price_eur = fx.to_eur(float(r["close"]), r["currency"])
-        shares = min(shares, math.floor(max_value / price_eur)) if price_eur > 0 else 0
-        if shares < 1:
-            skipped.append(_skip(r, "ZU_TEUER", preis_eur=price_eur))
-            continue
+        shares = risk_eur / stop_dist_eur
+        deckel = (max_value / price_eur) if price_eur > 0 else 0.0
+        if profil["bruchstuecke"]:
+            # Auf 4 Nachkommastellen, weil Broker Bruchstücke so ausweisen. Untergrenze ist
+            # nicht mehr „eine ganze Aktie“, sondern die kleinste sinnvolle Order.
+            shares = round(min(shares, deckel), 4)
+            if shares * price_eur < profil["min_order_eur"]:
+                skipped.append(_skip(r, "UNTER_MINDESTORDER", preis_eur=price_eur,
+                                     wert_eur=shares * price_eur, min_eur=profil["min_order_eur"]))
+                continue
+        else:
+            shares = math.floor(min(math.floor(shares), math.floor(deckel)))
+            if shares < 1:
+                skipped.append(_skip(r, "ZU_TEUER", preis_eur=price_eur))
+                continue
         new_risk = shares * stop_dist_eur
         if open_risk + new_risk > max_open_risk:
             skipped.append(_skip(r, "GESAMTRISIKO", grenze_eur=max_open_risk))
@@ -391,7 +461,7 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
             symbol=r["symbol"], isin=r["isin"], name=r["name"], region=region, currency=r["currency"],
             sector=r["sector"], close=float(r["close"]), breakout_level=float(r["breakout_level"]),
             initial_stop=float(r["initial_stop"]), atr=float(r["atr"]), rs_rank_pct=float(r["rs_rank_pct"]),
-            shares=int(shares), value_eur=shares * price_eur, risk_eur=new_risk, risk_pct=risk_pct,
+            shares=float(shares), value_eur=shares * price_eur, risk_eur=new_risk, risk_pct=risk_pct,
             limit_price=float(r["close"]) * 1.01, ampel=regime.LABEL.get(state, "UNBEKANNT"),
         ))
         per_region_left[region] -= 1
@@ -516,7 +586,8 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
 
     # 5. Screener
     ctx = ScreenerContext(satellite_equity_eur=account.satellite_equity_eur,
-                          risk_pct=max(risk_by_region.values()) if risk_by_region else 1.0, as_of=as_of)
+                          risk_pct=max(risk_by_region.values()) if risk_by_region else 1.0, as_of=as_of,
+                          profil=risikoprofil(settings, account.satellite_equity_eur))
     table = run_screener(cons, frames, settings, fx, ctx)
     if not table.empty:
         table.to_csv(settings.reports_dir / f"screener_{as_of.isoformat()}.csv", index=False, float_format="%.4f")
@@ -534,8 +605,12 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
     digest_md = None if offline else journal.run_weekly_digest(settings, as_of)
 
     # 9. Entscheidungen — hier und nur hier wird geurteilt.
+    # Die Mindestgröße nur rechnen, wenn nichts vorgeschlagen wurde: liegt ein Vorschlag vor,
+    # ist das Kapital offensichtlich ausreichend und die Zahl wäre nur Lärm.
+    mindest = None if proposals else mindestkapital(
+        settings, table, fx, ctx.risk_pct, account.satellite_equity_eur)
     d_ctx = _entscheidungs_kontext(settings, as_of, readings, risk_by_region, account, blocked, dry_run,
-                                   frames, positions, proposals)
+                                   frames, positions, proposals, mindestkapital_eur=mindest)
     _kern_kontext(settings, d_ctx, frames, positions, as_of)
     entscheidungen, abgelehnt = dec.alle_urteile(positions, proposals, skipped, d_ctx)
     kern = _kern_zusammenfassung(settings, d_ctx, as_of)
@@ -555,7 +630,8 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
 def _entscheidungs_kontext(settings: Settings, as_of: date, readings: dict[str, regime.RegimeReading],
                            risk_by_region: dict[str, float], account: journal.Account,
                            blocked: bool, dry_run: bool, frames: dict[str, pd.DataFrame],
-                           positions: list[PositionView], proposals: list[Proposal]) -> Kontext:
+                           positions: list[PositionView], proposals: list[Proposal],
+                           mindestkapital_eur: float | None = None) -> Kontext:
     """Rohwerte für das Entscheidungsmodell einsammeln — ohne Pipeline-Typen weiterzureichen."""
     limits = settings.get("signal.max_new_entries", {"GREEN": 2, "YELLOW": 1, "RED": 0})
     soft_weeks = int(settings.get("risk.soft_exit_weeks", 10))
@@ -581,6 +657,7 @@ def _entscheidungs_kontext(settings: Settings, as_of: date, readings: dict[str, 
 
     gebunden = sum(p.wert_eur or 0.0 for p in positions)
     equity = account.satellite_equity_eur
+    profil = risikoprofil(settings, equity)
     return Kontext(
         as_of=as_of,
         ampel={r: rd.effective for r, rd in readings.items()},
@@ -595,6 +672,8 @@ def _entscheidungs_kontext(settings: Settings, as_of: date, readings: dict[str, 
         kill_aktiv=blocked, kill_grund=account.kill_switch_reason,
         trockenlauf_bis=account.dry_run_until if dry_run else None,
         soft_exit_wochen=soft_weeks,
-        max_positionen=int(settings.get("risk.max_positions", 5)),
+        max_positionen=profil["max_positions"],
+        kleines_depot=profil["klein"],
+        mindestkapital_eur=mindestkapital_eur,
         startphase=len(journal.closed_theses(settings)) < int(settings.get("risk.start_trades", 20)),
     )

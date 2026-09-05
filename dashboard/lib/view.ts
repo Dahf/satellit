@@ -28,9 +28,13 @@ export interface ChartSpec {
 export interface Feld {
   name: string;
   label: string;
-  typ: "dezimal" | "ganzzahl" | "datum" | "text";
+  /** "mehrzeilig" ist Fließtext (Geschäftsmodell, Kill-Kriterien), nicht Zahleneingabe. */
+  typ: "dezimal" | "ganzzahl" | "datum" | "text" | "mehrzeilig";
   wert: string | number | null;
   pflicht: boolean;
+  /** Nicht leer -> Auswahlliste statt freier Eingabe. */
+  auswahl?: string[];
+  hinweis?: string;
 }
 
 export interface AktionSpec {
@@ -125,6 +129,20 @@ export interface Band {
   ziel: number;
 }
 
+/** Kopfdaten des letzten Kern-Scans. Er läuft eigenständig und selten (Fundamentaldaten je
+ *  Titel), deshalb gehört sein Datum sichtbar dazu — sonst wirkt die Liste tagesaktuell. */
+export interface KernScan {
+  gelaufen: boolean;
+  as_of?: string;
+  quelle?: "universum" | "watchlist" | "demo" | string;
+  geprueft?: number;
+  vorgefiltert?: number;
+  trichter?: Record<string, number>;
+  hinweise?: string[];
+  demo?: boolean;
+  watchlist: number;
+}
+
 export interface View {
   schema: number;
   as_of: string;
@@ -158,6 +176,9 @@ export interface View {
   etf_katalog: EtfEintrag[];
   ampel: Record<string, Ampel>;
   entscheidungen: Entscheidung[];
+  /** Geprüfte Kern-Aktien aus dem letzten Kern-Scan — Vorschläge, kein Bestand. */
+  kern_kandidaten: Entscheidung[];
+  kern_scan: KernScan;
   abgelehnt: Entscheidung[];
   screener_trichter: Record<string, number>;
   sperren: {

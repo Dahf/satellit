@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { eur } from "@/lib/utils";
 
@@ -30,12 +30,41 @@ export interface EtfEintrag {
  */
 export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
   const router = useRouter();
-  const welt = useMemo(() => etfs.filter((e) => e.gruppe === "welt"), [etfs]);
+  // Der Katalog steckt im Payload, das aber erst ein Lauf erzeugt. Im Onboarding hat noch
+  // keiner stattgefunden — deshalb bei leerer Liste direkt beim Backend nachfragen.
+  const [geladen, setGeladen] = useState<EtfEintrag[]>(etfs);
+  const [laedt, setLaedt] = useState(etfs.length === 0);
+
+  useEffect(() => {
+    if (etfs.length > 0) return;
+    let abgebrochen = false;
+    (async () => {
+      try {
+        const antwort = await fetch("/api/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "portfolio.katalog", body: {} }),
+        });
+        const daten = await antwort.json();
+        if (!abgebrochen && daten?.result?.etfs) setGeladen(daten.result.etfs as EtfEintrag[]);
+      } catch {
+        /* Die freie ISIN-Eingabe trägt den Fall — kein Grund, das Onboarding zu blockieren. */
+      } finally {
+        if (!abgebrochen) setLaedt(false);
+      }
+    })();
+    return () => {
+      abgebrochen = true;
+    };
+  }, [etfs.length]);
+
+  const welt = useMemo(() => geladen.filter((e) => e.gruppe === "welt"), [geladen]);
   const [start, setStart] = useState("");
   const [rate, setRate] = useState("");
   const [tag, setTag] = useState("1");
-  const [isin, setIsin] = useState(welt[0]?.isin ?? "");
+  const [isin, setIsin] = useState("");
   const [aktien, setAktien] = useState(false);
+  const [trockenlauf, setTrockenlauf] = useState(true);
   const [laeuft, setLaeuft] = useState(false);
   const [fehler, setFehler] = useState<string | null>(null);
 
@@ -43,7 +72,11 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
   const kern = startZahl * 0.9;
   const satellit = startZahl - kern;
   const etfAnteil = aktien ? 0.8 : 1.0;
-  const gewaehlt = etfs.find((e) => e.isin === isin);
+  const gewaehlt = geladen.find((e) => e.isin === isin);
+
+  useEffect(() => {
+    if (!isin && welt.length > 0) setIsin(welt[0].isin);
+  }, [welt, isin]);
 
   async function absenden() {
     setFehler(null);
@@ -62,6 +95,7 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
             sparplan_tag: Number(tag) || 1,
             etf_isin: isin,
             etf_anteil: etfAnteil,
+            trockenlauf_tage: trockenlauf ? 14 : 0,
           },
         }),
       });
@@ -114,7 +148,9 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
       </Schritt>
 
       <Schritt nummer="3" titel="Welchen Welt-ETF?">
-        {welt.length === 0 && (
+        {laedt && <p className="mb-4 text-etikett text-muted-foreground">Auswahlliste wird geladen …</p>}
+
+        {!laedt && welt.length === 0 && (
           <div className="mb-4 rounded-md bg-achtung-weich px-3 py-2.5 text-etikett leading-relaxed text-achtung">
             Die Auswahlliste konnte nicht geladen werden — <code className="font-mono">config/etf_universe.yaml</code>{" "}
             fehlt auf dem Server. Trag die ISIN so lange von Hand ein; alles andere funktioniert
@@ -122,7 +158,7 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
           </div>
         )}
 
-        {welt.length === 0 && (
+        {!laedt && welt.length === 0 && (
           <label className="flex flex-col gap-1">
             <span className="text-marginalie uppercase tracking-wider text-muted-foreground">ISIN des ETF</span>
             <input
@@ -189,6 +225,28 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
         </label>
       </Schritt>
 
+      <Schritt nummer="5" titel="Zwei Wochen Trockenlauf vorweg?">
+        <label className="flex items-start gap-2.5 text-lauftext">
+          <input
+            type="checkbox"
+            checked={trockenlauf}
+            onChange={(e) => setTrockenlauf(e.target.checked)}
+            className="mt-1 h-4 w-4 shrink-0"
+          />
+          <span>
+            Ja — zwei Wochenenden nur mitlesen, bevor der Satellit kaufen darf.
+            <span className="mt-1 block text-etikett leading-relaxed text-muted-foreground">
+              Der Trockenlauf prüft Daten, nicht den Markt: Du siehst zwei vollständige Berichte und
+              kannst falsche Ticker-Zuordnungen und unplausible Ampeln finden, bevor echtes Geld an
+              einem maschinellen Signal hängt. Er betrifft <strong>nur den Satelliten</strong> — der
+              Kern startet in jedem Fall sofort (Abschnitt 10.1). Ohne Haken entfällt die Frist; die
+              Ampel steht wegen ihrer Hysterese trotzdem die ersten zwei Läufe auf Rot und erlaubt
+              solange keine Einstiege.
+            </span>
+          </span>
+        </label>
+      </Schritt>
+
       {fehler && <p className="mt-6 rounded-md bg-verkauf-weich px-3 py-2 text-etikett text-verkauf">{fehler}</p>}
 
       <div className="mt-8 border-t border-border pt-6">
@@ -201,8 +259,9 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
           {laeuft ? "Wird eingerichtet …" : "Einrichten"}
         </button>
         <p className="mt-3 max-w-[52ch] text-etikett leading-relaxed text-muted-foreground">
-          Danach läuft zwei Wochen ein Trockenlauf: Du siehst alles, gibst aber noch keine Order auf.
-          So verlangt es Abschnitt 10.1 deines Plans.
+          {trockenlauf
+            ? "Danach läuft zwei Wochen ein Trockenlauf: Du siehst alles, gibst aber im Satelliten noch keine Order auf. Der Kern beginnt sofort."
+            : "Der Satellit ist damit ab dem ersten Lauf freigegeben — sobald die Ampel es zulässt. Der Kern beginnt sofort."}
           {gewaehlt && ` Der Sparplan auf ${gewaehlt.name} wird dir als erste Aufgabe angezeigt.`}
         </p>
       </div>

@@ -28,6 +28,19 @@ def einstellungen(tmp: str) -> Settings:
     return s
 
 
+def einstellungen_mit_journal(tmp: str) -> Settings:
+    """Wie `einstellungen`, aber mit nutzbarem Thesenspeicher.
+
+    Der liegt unter vendor/ und wird relativ zum Root aufgelöst — in einem Temp-Root gibt es
+    ihn nicht. Für Tests, die Thesen anlegen, zeigt der Pfad deshalb aufs echte Repo; der
+    Ablageort der Thesen bleibt das Temp-Verzeichnis.
+    """
+    s = einstellungen(tmp)
+    s.raw.setdefault("paths", {})["vendor_skills_dir"] = str(ROOT / "vendor" / "claude-trading-skills" / "skills")
+    s.raw["paths"]["exclusions_file"] = str(Path(tmp) / "exclusions.yaml")
+    return s
+
+
 def b(datum: str, typ: str, topf: str, betrag: float = 0.0, **kw) -> pf.Buchung:
     return pf.Buchung(datum=datum, typ=typ, topf=topf, betrag_eur=betrag, **kw)
 
@@ -267,6 +280,163 @@ class TestGrenzen(unittest.TestCase):
         ok, grund = pf.kern_grenze_ok(pf.Werte(), self.s, "DE000", 100.0)
         self.assertFalse(ok)
         self.assertIn("Depotwert", grund)
+
+
+class TestKernKaufweg(unittest.TestCase):
+    """Der Kaufweg für Kern-Aktien war bis hierher nur behauptet.
+
+    CHANGELOG_REGELN nannte die Grenzen aus 3.2 und 3.3 als „vom Dashboard erzwungen";
+    tatsächlich rief niemand kern_grenze_ok auf, und es gab keinen Knopf, der eine
+    Kern-Aktie hätte buchen können.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = einstellungen_mit_journal(self.tmp.name)
+        pf.speichere_plan(self.s, pf.Plan(
+            start_datum="2026-01-05", monatsrate_eur=500.0, sparplan_tag=1,
+            etf={"isin": "IE00B4L5Y983", "symbol": "SWDA.L", "name": "Welt-ETF", "anteil_kern": 0.8},
+            onboarding_erledigt=True))
+        pf.schreibe_buchungen(self.s, [
+            b("2026-01-05", "einzahlung", "cash", 20000.0),
+            b("2026-01-05", "umschichtung", "kern_etf", 14400.0),
+            b("2026-01-05", "umschichtung", "kern_aktie", 3600.0),
+            b("2026-01-05", "umschichtung", "satellit", 2000.0),
+        ])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _buchen(self, **kw):
+        from satellit.api import action_ledger_add
+
+        koerper = {"typ": "kern_kauf", "topf": "kern_aktie", "datum": "2026-01-06",
+                   "betrag_eur": 800.0, "isin": "DE0007164600", "symbol": "SAP.DE",
+                   "stueck": 4.0, "kurs": 200.0}
+        koerper.update(kw)
+        return action_ledger_add(self.s, koerper)
+
+    def test_ohne_these_kein_kauf(self):
+        """Trading-Plan 3.2 — bisher stand das nur im Dokument."""
+        with self.assertRaises(ValueError) as f:
+            self._buchen()
+        self.assertIn("These", str(f.exception))
+
+    def test_grenze_greift_vor_der_thesenpruefung(self):
+        """Die härtere Regel zuerst: 5 % von 20.000 EUR sind 1.000 EUR."""
+        with self.assertRaises(ValueError) as f:
+            self._buchen(betrag_eur=1500.0)
+        self.assertIn("5 %", str(f.exception))
+
+    def test_andere_toepfe_bleiben_ungeprueft(self):
+        """Der ETF-Sparplan kennt diese Grenzen nicht und darf nicht daran scheitern."""
+        r = self._buchen(typ="sparplan", topf="kern_etf", betrag_eur=5000.0,
+                         isin="IE00B4L5Y983", symbol="SWDA.L")
+        self.assertEqual(r["topf"], "kern_etf")
+
+    def test_mit_these_wird_gebucht(self):
+        journal.new_thesis(
+            self.s, symbol="SAP.DE", isin="DE0007164600", name="SAP SE", region="EU",
+            currency="EUR", sector="IT", entry=210.0, stop=0.0, breakout_level=None,
+            rs_rank_pct=None, ampel=None, report_file="test", setup_type="core_holding",
+            review_days=180, kill_criteria=["FCF zwei Jahre negativ", "Verschuldung über 4"])
+        r = self._buchen()
+        self.assertEqual(r["topf"], "kern_aktie")
+        werte = pf.bewerte(self.s, pf.lade_plan(self.s), pf.lies_ledger(self.s), {})
+        self.assertGreater(werte.kern_aktien_eur, 0)
+
+
+class TestNeueinrichtung(unittest.TestCase):
+    """Zurücksetzen heißt stornieren, nicht löschen — das Kassenbuch kennt keine Löschung."""
+
+    def setUp(self):
+        from satellit.api import action_portfolio_setup
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = einstellungen_mit_journal(self.tmp.name)
+        action_portfolio_setup(self.s, {"start_eur": 2500.0, "rate_eur": 200.0, "sparplan_tag": 1,
+                                        "etf_isin": "IE00B4L5Y983", "etf_anteil": 0.8})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _reset(self, **kw):
+        from satellit.api import action_portfolio_reset
+
+        return action_portfolio_reset(self.s, kw)
+
+    def test_reset_macht_das_onboarding_wieder_sichtbar(self):
+        self.assertTrue(pf.lade_plan(self.s).onboarding_erledigt)
+        self._reset()
+        self.assertFalse(pf.lade_plan(self.s).onboarding_erledigt)
+
+    def test_eroeffnungsbuchungen_werden_storniert_nicht_geloescht(self):
+        vorher = len(pf.lies_ledger(self.s))
+        r = self._reset()
+        nachher = pf.lies_ledger(self.s)
+        self.assertGreater(r["storniert"], 0)
+        self.assertGreater(len(nachher), vorher)                    # Gegenbuchungen kamen dazu
+        self.assertTrue([b for b in nachher if b.typ == "storno"])
+        werte = pf.bewerte(self.s, pf.lade_plan(self.s), nachher, {})
+        self.assertAlmostEqual(werte.gesamt_eur, 0.0, places=2)     # wirksam bleibt nichts
+
+    def test_spaetere_buchungen_bleiben_stehen(self):
+        """Ein Reset der Einrichtung darf keine echte Geschichte tilgen."""
+        pf.schreibe_buchung(self.s, b("2026-03-01", "sparplan", "kern_etf", 200.0,
+                                      isin="IE00B4L5Y983", stueck=2.0, notiz="Sparplan 2026-03"))
+        self._reset()
+        uebrig = [x for x in pf._wirksame(pf.lies_ledger(self.s)) if x.typ == "sparplan"]
+        self.assertEqual(len(uebrig), 1)
+
+    def test_konto_wird_geleert(self):
+        self._reset()
+        acc = journal.Account.load(self.s)
+        self.assertIsNone(acc.satellite_equity_eur)
+        self.assertIsNone(acc.dry_run_until)
+        self.assertFalse(acc.kill_switch_active)
+
+    def test_zweiter_reset_storniert_nicht_erneut(self):
+        self._reset()
+        self.assertEqual(self._reset()["storniert"], 0)
+
+    def test_danach_laesst_sich_neu_einrichten(self):
+        from satellit.api import action_portfolio_setup
+
+        self._reset()
+        r = action_portfolio_setup(self.s, {"start_eur": 10000.0, "rate_eur": 300.0,
+                                            "sparplan_tag": 1, "etf_isin": "IE00B4L5Y983",
+                                            "etf_anteil": 1.0})
+        self.assertEqual(r["kern_eur"], 9000.0)
+        werte = pf.bewerte(self.s, pf.lade_plan(self.s), pf.lies_ledger(self.s), {})
+        self.assertAlmostEqual(werte.gesamt_eur, 10000.0, places=2)  # nicht 12.500
+
+    def test_trockenlauf_ist_beim_einrichten_abwaehlbar(self):
+        from satellit.api import action_portfolio_setup
+
+        self._reset()
+        r = action_portfolio_setup(self.s, {"start_eur": 2500.0, "rate_eur": 0, "sparplan_tag": 1,
+                                            "etf_isin": "IE00B4L5Y983", "etf_anteil": 1.0,
+                                            "trockenlauf_tage": 0})
+        self.assertIsNone(r["trockenlauf_bis"])
+        self.assertIsNone(journal.Account.load(self.s).dry_run_until)
+
+
+class TestTrImportKernZuordnung(unittest.TestCase):
+    """Ohne die Kern-ISINs landete jeder importierte Aktienkauf im Satelliten — auch eine
+    Kern-Aktie. Der Satellit sah dann im Kassenbuch größer aus, als er ist."""
+
+    def test_ohne_kern_isins_geht_alles_in_den_satelliten(self):
+        self.assertEqual(tr_import._topf_fuer("DE0007164600", None), "satellit")
+
+    def test_mit_kern_isin_landet_der_kauf_im_kern(self):
+        self.assertEqual(tr_import._topf_fuer("DE0007164600", None, {"DE0007164600"}), "kern_aktie")
+
+    def test_gross_und_kleinschreibung_egal(self):
+        self.assertEqual(tr_import._topf_fuer("de0007164600", None, {"DE0007164600"}), "kern_aktie")
+
+    def test_etf_hat_vorrang_vor_der_kernliste(self):
+        plan = pf.Plan(etf={"isin": "IE00B4L5Y983", "symbol": "SWDA.L", "name": "ETF"})
+        self.assertEqual(tr_import._topf_fuer("IE00B4L5Y983", plan, {"IE00B4L5Y983"}), "kern_etf")
 
 
 class TestRendite(unittest.TestCase):

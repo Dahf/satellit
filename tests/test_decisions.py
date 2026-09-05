@@ -180,6 +180,147 @@ class TestZusammenbau(unittest.TestCase):
         self.assertEqual(cash[0].verdikt, dec.HALTEN)
 
 
+class TestZuKleinerSatellit(unittest.TestCase):
+    """Ohne diese Zeile meldet die Ansicht wochenlang nur „zu teuer“, ohne den Grund zu nennen."""
+
+    def test_zu_klein_nennt_vorhandenes_und_noetiges_kapital(self):
+        d = dec.urteil_satellit_zu_klein(kontext(equity_eur=250.0, cash_eur=250.0,
+                                                 mindestkapital_eur=1000.0))
+        self.assertIsNotNone(d)
+        self.assertEqual(d.verdikt, dec.WARTEN)
+        self.assertEqual(d.dringlichkeit, dec.INFO)
+        self.assertIn("250", d.begruendung)
+        self.assertIn("1.000", d.begruendung)
+        self.assertIn("750", d.begruendung)          # was fehlt, nicht nur was nötig ist
+        self.assertIsNone(d.aktion)                  # es gibt nichts zu klicken
+
+    def test_zu_klein_stellt_den_kern_ausdruecklich_frei(self):
+        """Der Satz darf nicht als „mach gar nichts“ gelesen werden — der Kern läuft weiter."""
+        d = dec.urteil_satellit_zu_klein(kontext(equity_eur=250.0, mindestkapital_eur=1000.0))
+        self.assertTrue(any("Kern" in h for h in d.hinweise))
+
+    def test_ohne_mindestkapital_keine_zeile(self):
+        self.assertIsNone(dec.urteil_satellit_zu_klein(kontext(equity_eur=10_000.0)))
+
+    def test_ersetzt_die_cash_zeile_statt_sie_zu_ergaenzen(self):
+        """Zwei Zeilen über dasselbe Geld widersprechen sich: „wartet auf ein Signal“ wäre
+        falsch, wenn kein Signal je zu einer Order führen könnte."""
+        out, _ = dec.alle_urteile([], [], [], kontext(equity_eur=250.0, cash_eur=250.0,
+                                                      mindestkapital_eur=1000.0))
+        arten = [d.art for d in out]
+        self.assertIn("satellit_zu_klein", arten)
+        self.assertNotIn("cash", arten)
+
+    def test_bei_ausreichendem_kapital_bleibt_die_cash_zeile(self):
+        out, _ = dec.alle_urteile([], [], [], kontext(equity_eur=10_000.0, cash_eur=2_000.0))
+        arten = [d.art for d in out]
+        self.assertIn("cash", arten)
+        self.assertNotIn("satellit_zu_klein", arten)
+
+
+class TestKernKandidat(unittest.TestCase):
+    """Der Kern kennt weder Ampel noch Trockenlauf — beide betreffen nur den Satelliten."""
+
+    def _kandidat(self, **kw):
+        from satellit.kern_screener import KernKandidat, Kriterium
+
+        basis = dict(
+            symbol="SAP.DE", isin="DE0007164600", name="SAP SE", sektor="IT", region="EU",
+            kurs_eur=210.0, jahre_abgedeckt=5, daten_stand="2026-09-05",
+            kriterien=[Kriterium(1, "Geschäftsmodell in zwei Sätzen erklärbar", None, "offen"),
+                       Kriterium(2, "Wachstum über den Zyklus", True, "steigend"),
+                       Kriterium(3, "Kapitalrendite über 10 %", True, "ROIC 18 %"),
+                       Kriterium(4, "Nettoverschuldung / EBITDA unter 2,5", True, "0,80"),
+                       Kriterium(5, "Free Cashflow positiv", None, "5 von 5 — Fenster nicht abgedeckt"),
+                       Kriterium(6, "Über 5 Jahre notiert", True, "seit 1988"),
+                       Kriterium(7, "Kill-Kriterien schriftlich", None, "offen", "Trading-Plan 3.2")],
+            soll=[Kriterium(0, "Dividende nicht gekürzt", True, "keine Kürzung")],
+        )
+        basis.update(kw)
+        return KernKandidat(**basis)
+
+    def test_offenes_fenster_erlaubt_die_these(self):
+        d = dec.urteil_kern_kandidat(self._kandidat(), kontext(kauffenster={"offen": True, "grund": "quartal"}))
+        self.assertIsNotNone(d.aktion)
+        self.assertEqual(d.aktion.aktion, "journal.new")
+        self.assertTrue(d.aktion.body["core"])
+        self.assertIsNone(d.gesperrt_weil)
+
+    def test_geschlossenes_fenster_sperrt_den_kauf_nicht_die_these(self):
+        """Trading-Plan 3.4: „Zwischen den Terminen werden Kandidaten nur notiert, nie gekauft.“"""
+        d = dec.urteil_kern_kandidat(self._kandidat(),
+                                     kontext(kauffenster={"offen": False, "naechstes": "2026-10-01"}))
+        self.assertIsNotNone(d.aktion)                 # notieren bleibt möglich
+        self.assertIn("2026-10-01", d.gesperrt_weil)
+
+    def test_menschliche_kriterien_sind_pflichtfelder(self):
+        """Kriterium 1 und 7 kann kein Code beantworten — die Oberfläche erzwingt sie."""
+        d = dec.urteil_kern_kandidat(self._kandidat(), kontext(kauffenster={"offen": True}))
+        pflicht = {f["name"] for f in d.aktion.felder if f["pflicht"]}
+        self.assertEqual(pflicht, {"geschaeftsmodell", "kill_1", "kill_2"})
+
+    def test_durchgefallener_titel_bekommt_keine_aktion(self):
+        from satellit.kern_screener import Kriterium
+
+        k = self._kandidat()
+        k.kriterien[3] = Kriterium(4, "Nettoverschuldung / EBITDA unter 2,5", False, "6,10")
+        d = dec.urteil_kern_kandidat(k, kontext(kauffenster={"offen": True}))
+        self.assertIsNone(d.aktion)
+        self.assertEqual(d.verdikt, dec.NICHT_KAUFEN)
+        self.assertIn("Kriterium 4", d.gesperrt_weil)
+
+    def test_ausschluss_schlaegt_alles(self):
+        d = dec.urteil_kern_kandidat(self._kandidat(ausschluss="Läuft im Satelliten."),
+                                     kontext(kauffenster={"offen": True}))
+        self.assertIsNone(d.aktion)
+        self.assertIn("Satelliten", d.gesperrt_weil)
+
+    def test_kein_ampelbezug_im_kern(self):
+        d = dec.urteil_kern_kandidat(self._kandidat(), kontext(kauffenster={"offen": True}))
+        self.assertIsNone(d.ampel)
+        self.assertFalse([b for b in d.belege if "Ampel" in b.label])
+
+    def test_trockenlauf_sperrt_den_kern_nicht(self):
+        """Der Trockenlauf ist eine Satelliten-Regel (10.1). Griffe er hier, stünde der Kern still."""
+        d = dec.urteil_kern_kandidat(self._kandidat(),
+                                     kontext(kauffenster={"offen": True}, trockenlauf_bis="2026-12-31"))
+        self.assertIsNotNone(d.aktion)
+        self.assertIsNone(d.gesperrt_weil)
+
+    def test_offene_kriterien_werden_als_offen_ausgewiesen(self):
+        d = dec.urteil_kern_kandidat(self._kandidat(), kontext(kauffenster={"offen": True}))
+        offen = [b for b in d.belege if b.erfuellt is None and b.label.startswith("·")]
+        self.assertEqual(len(offen), 3)               # Kriterien 1, 5 und 7
+        self.assertTrue(any("nicht geprüft" in h for h in d.hinweise))
+
+    def test_kandidaten_landen_nicht_unter_zu_tun(self):
+        """Ein Kandidat ist keine Aufgabe für den Montag."""
+        d = dec.urteil_kern_kandidat(self._kandidat(), kontext(kauffenster={"offen": True}))
+        self.assertEqual(d.dringlichkeit, dec.INFO)
+
+
+class TestStueckzahlFormat(unittest.TestCase):
+    """Ganze Anteile und Bruchstücke müssen beide stimmen — ein festes Format macht eines falsch."""
+
+    def test_ganze_stueck_ohne_nachkommastellen(self):
+        self.assertEqual(dec.stueck(12), "12")
+        self.assertEqual(dec.stueck(12.0), "12")
+
+    def test_bruchstueck_mit_nachkommastellen(self):
+        self.assertEqual(dec.stueck(0.2634), "0,2634")
+
+    def test_nachlaufende_nullen_fallen_weg(self):
+        self.assertEqual(dec.stueck(1.5), "1,5")
+
+    def test_fehlende_zahl_wird_nicht_zu_null(self):
+        self.assertEqual(dec.stueck(None), "–")
+        self.assertEqual(dec.stueck(float("nan")), "–")
+
+    def test_kandidat_zeigt_bruchstuecke_lesbar(self):
+        d = dec.urteil_satellit_kandidat(kandidat(shares=0.2634, value_eur=55.3), kontext())
+        self.assertIn("0,2634 Stück", d.begruendung)
+
+
 class TestFormatierung(unittest.TestCase):
     def test_deutsche_zahlen(self):
         self.assertEqual(dec.zahl(1234.5), "1.234,50")

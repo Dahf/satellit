@@ -16,6 +16,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:                                  # nur für Typprüfer, kein Laufzeit-Import
+    from .kern_screener import KernKandidat
     from .pipeline import PositionView, Proposal
 
 # --------------------------------------------------------------------------- Verdikte
@@ -49,6 +50,25 @@ def zahl(x: Any, stellen: int = 2, einheit: str = "") -> str:
         if f != f or f in (float("inf"), float("-inf")):     # NaN/Inf ohne numpy
             return "–"
         return f"{f:,.{stellen}f}{einheit}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
+        return "–"
+
+
+def stueck(x: Any) -> str:
+    """Stückzahl: ganze Anteile ohne Nachkommastellen, Bruchstücke mit bis zu vieren.
+
+    '3 Stück' und '0,2634 Stück' müssen beide stimmen — ein festes Format macht das eine
+    falsch. Nachlaufende Nullen fallen weg, sonst liest sich jede ganze Zahl wie ein Bruch.
+    """
+    try:
+        if x is None:
+            return "–"
+        f = float(x)
+        if f != f:
+            return "–"
+        if abs(f - round(f)) < 1e-9:
+            return zahl(f, 0)
+        return zahl(f, 4).rstrip("0").rstrip(",")
     except (TypeError, ValueError):
         return "–"
 
@@ -167,6 +187,8 @@ class Kontext:
     soft_exit_wochen: int = 10
     max_positionen: int = 5
     startphase: bool = False           # < risk.start_trades abgeschlossene Trades
+    kleines_depot: bool = False        # Konzentrationsprofil aus risk.klein ist wirksam
+    mindestkapital_eur: float | None = None   # gesetzt -> mit diesem Kapital ist kein Einstieg möglich
     # --- Kern (Phase 2). Ohne Plan bleibt alles davon leer und es entstehen keine Kern-Zeilen.
     kern_plan: Any = None              # portfolio.Plan
     kern_werte: Any = None             # portfolio.Werte
@@ -175,6 +197,8 @@ class Kontext:
     sparplan_offen: bool = False       # Ausführung dieses Monats fehlt noch
     startbetrag_offen: dict = field(default_factory=dict)   # {etf_eur, aktien_eur}
     kern_thesen: list = field(default_factory=list)         # offene core_holding-Thesen
+    kern_kandidaten: list = field(default_factory=list)      # KernKandidat aus dem letzten Scan
+    kern_scan_stand: str | None = None                       # ISO-Datum des letzten Scans
     depot_abgleich_faellig: bool = False
     band: dict = field(default_factory=dict)
 
@@ -274,7 +298,7 @@ def urteil_satellit_position(p: PositionView, ctx: Kontext) -> Decision:
         return Decision(
             verdikt=VERKAUFEN, verdikt_label=VERDIKT_LABEL[VERKAUFEN], dringlichkeit=SOFORT,
             begruendung=(f"Der Wochenschluss liegt unter dem Durchschnitt der letzten {ctx.soft_exit_wochen} Wochen — "
-                         f"der Trend ist gebrochen. Alle {zahl(p.shares, 0)} Stück am Montag verkaufen."),
+                         f"der Trend ist gebrochen. Alle {stueck(p.shares)} Stück am Montag verkaufen."),
             hinweise=["Bestpreis-Market-Order: Europa 9:05–17:30, USA ab 15:35."],
             regeln=["Trading-Plan 7"],
             chart=_kurschart(ctx, p.symbol, linien,
@@ -328,6 +352,25 @@ def urteil_satellit_position(p: PositionView, ctx: Kontext) -> Decision:
 
 
 # --------------------------------------------------------------------------- Kandidaten
+def _bruchstueck_hinweis(anteile: float | None) -> list[str]:
+    """Bei Bruchstücken darauf hinweisen, dass die Stop-Order zu prüfen ist.
+
+    Der Plan setzt eine ruhende Stop-Market-Order beim Broker voraus (Anhang A). Ob die auf
+    einer Bruchstück-Position möglich ist, hängt am Broker; geht sie nicht, greift der Stop
+    erst im nächsten Wochenlauf. Das gehört an die Order, nicht in eine Konfigurationsdatei,
+    die beim Kaufen niemand liest.
+    """
+    try:
+        f = float(anteile)
+    except (TypeError, ValueError):
+        return []
+    if f != f or abs(f - round(f)) < 1e-9:
+        return []
+    return ["Das ist ein Bruchstück. Prüf beim Einstellen der Order, ob sich darauf ein "
+            "Stop-Market legen lässt. Falls nicht, greift der Stop erst im nächsten "
+            "Wochenlauf — dann ist er deine eigene Kontrolle."]
+
+
 def urteil_satellit_kandidat(p: Proposal, ctx: Kontext) -> Decision:
     sperre = _sperre(ctx)
     rs = f"Top {zahl((p.rs_rank_pct or 0) * 100, 0)} %" if p.rs_rank_pct is not None else "–"
@@ -336,7 +379,8 @@ def urteil_satellit_kandidat(p: Proposal, ctx: Kontext) -> Decision:
         Beleg("Relative Stärke", f"{rs} in {p.region}", True, "Trading-Plan 5.2"),
         Beleg("Ausbruch", f"Wochenschluss {zahl(p.close)} ≥ 20-Wochen-Hoch {zahl(p.breakout_level)}",
               True, "Trading-Plan 5.3"),
-        Beleg("Positionsgröße", f"{p.shares} Stück ≈ {zahl(p.value_eur, 0)} EUR", None, "Trading-Plan 6"),
+        Beleg("Positionsgröße", f"{stueck(p.shares)} Stück ≈ {zahl(p.value_eur, 0)} EUR", None,
+              "Trading-Plan 6"),
         Beleg("Risiko", f"{zahl(p.risk_eur, 0)} EUR ({zahl(p.risk_pct, 2)} % des Satelliten)", None,
               "Trading-Plan 6"),
         Beleg("Initialstop", f"{zahl(p.initial_stop)} = Einstieg − 3 × ATR(20)", None, "Trading-Plan 6"),
@@ -352,10 +396,11 @@ def urteil_satellit_kandidat(p: Proposal, ctx: Kontext) -> Decision:
         verdikt=KAUFEN, verdikt_label=VERDIKT_LABEL[KAUFEN], dringlichkeit=DIESE_WOCHE,
         symbol=p.symbol, isin=p.isin, name=p.name, region=p.region, waehrung=p.currency, sektor=p.sector,
         begruendung=(f"Neues 20-Wochen-Hoch bei intaktem Aufwärtstrend, relative Stärke {rs} in {p.region}. "
-                     f"{p.shares} Stück ≈ {zahl(p.value_eur, 0)} EUR mit Stop bei {zahl(p.initial_stop)} — "
+                     f"{stueck(p.shares)} Stück ≈ {zahl(p.value_eur, 0)} EUR mit Stop bei {zahl(p.initial_stop)} — "
                      f"dein Verlust ist auf {zahl(p.risk_eur, 0)} EUR begrenzt."),
-        hinweise=["Vor der Order: Chart ansehen. Kommt der Ausbruch aus einer ruhigen Seitwärtsphase "
-                  "von mindestens vier Wochen? Wenn nicht, Kandidaten streichen."],
+        hinweise=(["Vor der Order: Chart ansehen. Kommt der Ausbruch aus einer ruhigen Seitwärtsphase "
+                   "von mindestens vier Wochen? Wenn nicht, Kandidaten streichen."]
+                  + _bruchstueck_hinweis(p.shares)),
         belege=belege, regeln=["Trading-Plan 5", "Trading-Plan 6"],
         stueck=p.shares, betrag_eur=p.value_eur, kurs=p.close, limit_kurs=p.limit_price,
         stop_kurs=p.initial_stop,
@@ -393,6 +438,9 @@ SKIP_TEXTE = {
     "ZU_TEUER": lambda s: (f"Eine einzelne Aktie kostet {zahl(s.params.get('preis_eur'), 0)} EUR. Bei deinem "
                            f"Risiko je Trade käme weniger als ein ganzes Stück heraus, und Bruchstücke lassen "
                            f"keine Stop-Order zu."),
+    "UNTER_MINDESTORDER": lambda s: (f"Aus deinem Risiko je Trade ergeben sich nur "
+                                     f"{zahl(s.params.get('wert_eur'), 2)} EUR — weniger als die kleinste "
+                                     f"sinnvolle Order von {zahl(s.params.get('min_eur'), 2)} EUR."),
     "GESAMTRISIKO": lambda s: (f"Das offene Gesamtrisiko würde über {zahl(s.params.get('grenze_eur'), 0)} EUR "
                                f"steigen. Erst wenn Stops nachgezogen sind, ist wieder Platz."),
     "KILL_SWITCH": lambda s: "Der Kill-Switch ist aktiv — diese Woche keine neuen Einstiege.",
@@ -417,6 +465,49 @@ def urteil_abgelehnt(s: SkipInfo, ctx: Kontext) -> Decision:
 
 
 # --------------------------------------------------------------------------- Cash
+def urteil_satellit_zu_klein(ctx: Kontext) -> Decision | None:
+    """Der Satellit ist zu klein, um die Positionsgrößen des Plans darzustellen.
+
+    Die Gegenmaßnahme gegen eine Ansicht, die wochenlang nur „zu teuer“ meldet. Das ist
+    kein Marktereignis und kein Fehler, sondern Arithmetik: unterhalb einer bestimmten
+    Kapitalgröße ergibt Risiko je Trade geteilt durch Stopabstand weniger als eine
+    handelbare Stückzahl. Ohne diese Zeile sucht der Nutzer den Fehler bei sich.
+
+    Sie ersetzt urteil_cash, damit nicht zwei Zeilen dasselbe Geld erklären.
+    """
+    if not ctx.equity_eur or ctx.mindestkapital_eur is None:
+        return None
+    fehlt = ctx.mindestkapital_eur - ctx.equity_eur
+    hinweise = [
+        "Der Kern ist davon nicht betroffen — Sparplan und ETF laufen unverändert weiter.",
+        f"Wächst der Satellit über {zahl(ctx.mindestkapital_eur, 0)} EUR, entstehen die Vorschläge "
+        f"von selbst. Bis dahin ist hier nichts einzustellen.",
+    ]
+    if not ctx.kleines_depot:
+        hinweise.append("Für kleine Depots gibt es ein Konzentrationsprofil (risk.klein in "
+                        "config/settings.yaml): weniger, dafür größere Positionen.")
+    return Decision(
+        schluessel="CASH:zu_klein", art="satellit_zu_klein", topf="SATELLIT",
+        verdikt=WARTEN, verdikt_label=VERDIKT_LABEL[WARTEN], dringlichkeit=INFO,
+        name="Satellit noch zu klein zum Handeln",
+        betrag_eur=ctx.cash_eur, wert_eur=ctx.equity_eur,
+        begruendung=(f"Dein Satellit hat {zahl(ctx.equity_eur, 0)} EUR. Daraus lässt sich mit dem Risiko "
+                     f"je Trade und einem Stop bei 3 × ATR keine handelbare Position bilden — kein "
+                     f"Titel des Universums passt in diese Größe. Ab rund "
+                     f"{zahl(ctx.mindestkapital_eur, 0)} EUR ändert sich das "
+                     f"(es fehlen {zahl(fehlt, 0)} EUR). Bis dahin arbeitet nur der Kern; "
+                     f"das ist kein Versäumnis."),
+        hinweise=hinweise,
+        belege=[
+            Beleg("Vorhanden", zahl(ctx.equity_eur, 0, " EUR"), None, "Trading-Plan 1"),
+            Beleg("Rechnerisch nötig", zahl(ctx.mindestkapital_eur, 0, " EUR"), False, "Trading-Plan 6"),
+            Beleg("Profil", "kleines Depot (wenige, größere Positionen)" if ctx.kleines_depot
+                  else f"Regelwerte: höchstens {ctx.max_positionen} Positionen", None, "Trading-Plan 6"),
+        ],
+        regeln=["Trading-Plan 6", "Leitsatz 1"],
+    )
+
+
 def urteil_cash(ctx: Kontext) -> Decision | None:
     """Warten ist eine Position. Ohne diese Zeile fehlt dem Anfänger die Erlaubnis, nichts zu tun."""
     if ctx.cash_eur is None:
@@ -494,7 +585,8 @@ def urteil_kern_startbetrag(ctx: Kontext) -> list[Decision]:
             begruendung=(f"{zahl(aktien_eur, 0)} EUR sind für einzelne Kern-Aktien vorgesehen und liegen "
                          f"bereit." + ("" if gesperrt else " Das Fenster ist offen.")),
             hinweise=["Je Titel höchstens 5 % des Gesamtportfolios, Einzelaktien höchstens 20 % des Kerns.",
-                      "KERN.md 6 listet sieben Muss-Kriterien, die jeder Titel erfüllen muss."],
+                      "KERN.md 6 listet sieben Muss-Kriterien, die jeder Titel erfüllen muss.",
+                      "Geprüfte Kandidaten stehen weiter unten — der Kern-Scan wendet den Katalog an."],
             belege=[
                 Beleg("Kauffenster", {"quartal": "reguläres Quartalsfenster",
                                       "ersteinstieg": "einmaliger Ersteinstieg (Startbetrag)",
@@ -505,9 +597,126 @@ def urteil_kern_startbetrag(ctx: Kontext) -> list[Decision]:
                       hat_these, "Trading-Plan 3.2"),
             ],
             regeln=["Trading-Plan 3.2", "Trading-Plan 3.3", "Trading-Plan 3.4"],
+            # Bis hierher gab es für Kern-Aktien überhaupt keinen Buchungsweg: die Zeile nannte
+            # den Betrag und hörte auf. Jeder Kauf blieb im Kassenbuch unsichtbar, und der
+            # TR-Import buchte ihn in den Satelliten.
+            aktion=None if gesperrt else _kern_kauf_aktion(ctx, ctx.kern_thesen),
             gesperrt_weil=gesperrt,
         ))
     return out
+
+
+def _kern_kauf_aktion(ctx: Kontext, thesen: list) -> AktionSpec:
+    """Kauf einer Kern-Aktie ins Kassenbuch. Die Auswahl ist auf Titel mit These begrenzt —
+    ohne These kein Kauf (Trading-Plan 3.2), und das soll die Oberfläche nicht umgehen
+    können."""
+    auswahl = []
+    for eintrag in thesen:
+        these = eintrag[0] if isinstance(eintrag, (tuple, list)) else eintrag
+        prov = (these.get("origin") or {}).get("raw_provenance") or {}
+        symbol = prov.get("symbol") or these.get("ticker") or ""
+        if symbol:
+            auswahl.append(symbol)
+    return AktionSpec(
+        aktion="ledger.add", label="Kauf eintragen",
+        felder=[_feld("symbol", "Welche Aktie?", "text", auswahl[0] if auswahl else None, True,
+                      auswahl=auswahl),
+                _feld("betrag_eur", "Bezahlt (EUR)", "dezimal", None, True),
+                _feld("stueck", "Stück laut App", "dezimal", None, True),
+                _feld("kurs", "Kurs", "dezimal", None, False),
+                _feld("datum", "Datum", "datum", ctx.as_of.isoformat(), True)],
+        body={"typ": "kern_kauf", "topf": "kern_aktie", "notiz": "Kern-Aktie"},
+        bestaetigung="Ich habe den Kauf in der App ausgeführt.",
+    )
+
+
+def urteil_kern_kandidat(k: "KernKandidat", ctx: Kontext) -> Decision:
+    """Ein Titel, der den Kriterienkatalog aus KERN.md 6 durchlaufen hat.
+
+    Der Kern kennt keine Ampel und keinen Trockenlauf — `_sperre` wird hier bewusst *nicht*
+    aufgerufen. Beide betreffen den Satelliten; Trading-Plan 2 sagt für den Kern ausdrücklich,
+    dass nicht getimt wird.
+
+    Die beiden Kriterien, die Code nicht beantworten kann (1: Geschäftsmodell in zwei Sätzen,
+    7: zwei schriftliche Kill-Kriterien), werden zu Pflichtfeldern der Aktion. Damit erzwingt
+    die Oberfläche, was der Plan seit jeher verlangt und was bisher niemand prüfte: ohne
+    These kein Kauf.
+    """
+    fenster = ctx.kauffenster or {}
+    zeichen = {True: "✓", False: "✗", None: "·"}
+    belege = [Beleg(f"{zeichen[kr.erfuellt]} {kr.nummer}. {kr.label}", kr.wert, kr.erfuellt, kr.regel)
+              for kr in k.kriterien]
+    belege += [Beleg(f"Soll: {kr.label}", kr.wert, kr.erfuellt, "KERN.md 6") for kr in k.soll]
+    if k.jahre_abgedeckt:
+        belege.append(Beleg("Datenlage", f"{k.jahre_abgedeckt} Geschäftsjahre verfügbar"
+                            + (f", Stand {k.daten_stand}" if k.daten_stand else ""),
+                            None, "KERN.md 6"))
+
+    gesperrt = None
+    if k.ausschluss:
+        gesperrt = k.ausschluss
+    elif k.durchgefallen:
+        erste = k.durchgefallen[0]
+        gesperrt = (f"Kriterium {erste.nummer} ist nicht erfüllt: {erste.label} — {erste.wert}. "
+                    f"Der Katalog ist ein Filter, kein Score: ein Titel muss alle Muss-Kriterien "
+                    f"erfüllen.")
+    elif not fenster.get("offen"):
+        gesperrt = (f"Kern-Aktien werden nur in der ersten Handelswoche von Januar, April, Juli "
+                    f"und Oktober gekauft. Nächstes Fenster: {fenster.get('naechstes') or '?'}. "
+                    f"Bis dahin nur notieren.")
+
+    offen = len(k.ungeprueft)
+    if k.ausschluss:
+        text = f"{k.name} scheidet aus: {k.ausschluss}"
+    elif k.durchgefallen:
+        text = (f"{k.name} erfüllt {len(k.durchgefallen)} von sieben Muss-Kriterien nicht — "
+                f"{', '.join(str(x.nummer) for x in k.durchgefallen)}. Kein Kandidat für den Kern.")
+    else:
+        text = (f"{k.name} besteht alle rechenbaren Muss-Kriterien. "
+                + (f"Offen bleiben {offen} Kriterien, die nur du beantworten kannst — "
+                   f"Geschäftsmodell und Kill-Kriterien. " if offen else "")
+                + ("Das Fenster ist offen." if fenster.get("offen")
+                   else f"Gekauft wird erst ab {fenster.get('naechstes') or 'dem nächsten Fenster'}."))
+
+    hinweise = ["Je Titel höchstens 5 % des Gesamtportfolios, Einzelaktien höchstens 20 % des Kerns.",
+                "Halteabsicht mindestens drei Jahre, kein Stop. Verkauft wird nur bei Thesenbruch."]
+    if k.ungeprueft and not k.durchgefallen and not k.ausschluss:
+        hinweise.append("Ein offenes Kriterium heißt „nicht geprüft“, nicht „erfüllt“ — die "
+                        "Datenquelle reicht nicht so weit zurück, wie der Katalog verlangt.")
+
+    aktion = None
+    if not k.ausschluss and not k.durchgefallen:
+        # Auch bei geschlossenem Fenster anlegbar: Trading-Plan 3.4 sagt „Zwischen den
+        # Terminen werden Kandidaten nur notiert, nie gekauft" — das Notieren ist die These.
+        aktion = AktionSpec(
+            aktion="journal.new", label="These anlegen",
+            felder=[
+                _feld("geschaeftsmodell", "Geschäftsmodell in zwei Sätzen", "mehrzeilig", None, True,
+                      hinweis="Womit verdient das Unternehmen Geld, und warum kauft der Kunde dort?"),
+                _feld("kill_1", "Kill-Kriterium 1", "mehrzeilig", None, True,
+                      hinweis="Ein konkretes Ereignis, bei dem du verkaufst — z. B. „zwei Jahre in "
+                              "Folge negativer Free Cashflow“."),
+                _feld("kill_2", "Kill-Kriterium 2", "mehrzeilig", None, True,
+                      hinweis="z. B. „Nettoverschuldung/EBITDA über 4“ oder „Kerngeschäft verliert "
+                              "zwei Jahre in Folge Marktanteil“."),
+                _feld("entry", "Kurs (nur zur Dokumentation)", "dezimal",
+                      round(k.kurs_eur, 2) if k.kurs_eur else None, False),
+            ],
+            body={"symbol": k.symbol, "core": True, "isin": k.isin, "name": k.name},
+            bestaetigung="Ich habe die Kriterien selbst geprüft und halte den Titel mindestens drei Jahre.",
+        )
+
+    return Decision(
+        schluessel=f"KERNKAND:{k.symbol}", art="kern_kandidat", topf="KERN",
+        verdikt=PRUEFEN if aktion else NICHT_KAUFEN,
+        verdikt_label=VERDIKT_LABEL[PRUEFEN if aktion else NICHT_KAUFEN],
+        dringlichkeit=INFO,
+        symbol=k.symbol, isin=k.isin, name=k.name, region=k.region, waehrung=k.waehrung,
+        sektor=k.sektor, kurs=k.kurs_eur,
+        begruendung=text, hinweise=hinweise, belege=belege,
+        regeln=["KERN.md 6", "Trading-Plan 3.2", "Trading-Plan 3.4"],
+        aktion=aktion, gesperrt_weil=gesperrt,
+    )
 
 
 def urteil_kern_etf(ctx: Kontext) -> Decision | None:
@@ -671,14 +880,21 @@ def alle_urteile(positionen: list[PositionView], kandidaten: list[Proposal],
             out.append(etf)
         for these, wert, faellig in ctx.kern_thesen:
             out.append(urteil_kern_aktie(these, wert, faellig, ctx))
+        # Kandidaten nach dem Bestand: erst was du hast, dann was in Frage käme.
+        for kandidat in ctx.kern_kandidaten:
+            out.append(urteil_kern_kandidat(kandidat, ctx))
         if reb := urteil_rebalance(ctx):
             out.append(reb)
         if abgleich := urteil_depotabgleich(ctx):
             out.append(abgleich)
     if einrichtung := urteil_einrichtung(ctx):
         out.append(einrichtung)
-    cash = urteil_cash(ctx)
-    if cash:
+    # Ist der Satellit zu klein zum Handeln, erklärt das den Bestand vollständig — die
+    # allgemeine Cash-Zeile („wartet auf ein Signal“) wäre daneben irreführend, weil kein
+    # Signal je zu einer Order führen könnte.
+    if zu_klein := urteil_satellit_zu_klein(ctx):
+        out.append(zu_klein)
+    elif cash := urteil_cash(ctx):
         out.append(cash)
     out.sort(key=lambda d: -d.dringlichkeit)
 
@@ -691,5 +907,13 @@ def alle_urteile(positionen: list[PositionView], kandidaten: list[Proposal],
     return out, [urteil_abgelehnt(s, ctx) for s in abgelehnt]
 
 
-def _feld(name: str, label: str, typ: str, wert: Any = None, pflicht: bool = False) -> dict:
-    return {"name": name, "label": label, "typ": typ, "wert": wert, "pflicht": pflicht}
+def _feld(name: str, label: str, typ: str, wert: Any = None, pflicht: bool = False,
+          auswahl: list[str] | None = None, hinweis: str = "") -> dict:
+    """Ein Eingabefeld einer AktionSpec.
+
+    `typ`: dezimal | ganzzahl | datum | text | mehrzeilig. `mehrzeilig` ist für Fließtext
+    gedacht (Geschäftsmodell, Kill-Kriterien) — die Oberfläche zeigt dafür ein Textfeld
+    statt einer Zahleneingabe. `auswahl` macht daraus eine Liste.
+    """
+    return {"name": name, "label": label, "typ": typ, "wert": wert, "pflicht": pflicht,
+            "auswahl": auswahl or [], "hinweis": hinweis}
