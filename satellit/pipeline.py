@@ -141,7 +141,7 @@ def review_positions(settings: Settings, frames: dict[str, pd.DataFrame], fx: Fx
         stop = float((t.get("exit") or {}).get("stop_loss") or 0)
         sector = ((t.get("market_context") or {}).get("sector")) or "Unknown"
         df = frames.get(symbol)
-        view = PositionView(t["thesis_id"], symbol, t.get("thesis_statement", "")[:40], region, currency, sector,
+        view = PositionView(t["thesis_id"], symbol, _firmenname(t, symbol), region, currency, sector,
                             shares, entry, entry_date, stop, None, None, None, False, False, False, None, 0.0)
         if df is None or df.empty:
             view.note = "keine Kursdaten"
@@ -175,6 +175,20 @@ def review_positions(settings: Settings, frames: dict[str, pd.DataFrame], fx: Fx
         view.gewinn_eur = (view.wert_eur - view.einstand_eur) if view.einstand_eur is not None else None
         out.append(view)
     return out
+
+
+def _firmenname(t: dict, symbol: str) -> str:
+    """Firmenname aus der These. Die Thesen beginnen mit '<Name> (<Symbol>): …'.
+
+    Vorher standen hier die ersten 40 Zeichen des Thesensatzes — in einer Liste, die
+    Titel benennt, liest sich das als abgeschnittener Satz statt als Name.
+    """
+    satz = str(t.get("thesis_statement") or "").strip()
+    if not satz:
+        return symbol
+    kopf = satz.split(":", 1)[0]
+    name = kopf.split(" (", 1)[0].strip()
+    return name or symbol
 
 
 def _wochenpunkte(df: pd.DataFrame, soft_weeks: int, anzahl: int = 60) -> list[dict]:

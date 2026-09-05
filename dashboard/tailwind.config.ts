@@ -18,6 +18,27 @@ const config: Config = {
         muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
         accent: { DEFAULT: "hsl(var(--accent))", foreground: "hsl(var(--accent-foreground))" },
         card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },
+        rail: "hsl(var(--rail))",
+        // Handlungssignale — gesättigte Farbe gibt es auf dieser Seite nur hier.
+        kaufen: { DEFAULT: "var(--kaufen)", weich: "var(--kaufen-weich)" },
+        verkauf: { DEFAULT: "var(--verkauf)", weich: "var(--verkauf-weich)" },
+        achtung: { DEFAULT: "var(--achtung)", weich: "var(--achtung-weich)" },
+        neutral: { DEFAULT: "var(--neutral)", weich: "var(--neutral-weich)" },
+      },
+      fontFamily: {
+        // Spectral trägt die Stimme der Seite, Archivo die Bedienung, Plex Mono die Daten
+        // und die Regel-Fundstellen.
+        display: ['Spectral', 'Georgia', 'Times New Roman', 'serif'],
+        sans: ['Archivo', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'sans-serif'],
+        mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'],
+      },
+      fontSize: {
+        // Ein knapper, bewusst gesetzter Maßstab statt der vollen Tailwind-Leiter.
+        marginalie: ["0.6875rem", { lineHeight: "1rem", letterSpacing: "0.08em" }],
+        etikett: ["0.75rem", { lineHeight: "1.1rem", letterSpacing: "0.04em" }],
+        lauftext: ["0.9375rem", { lineHeight: "1.5rem" }],
+        ansage: ["1.0625rem", { lineHeight: "1.55rem" }],
+        titel: ["clamp(1.75rem, 1.2rem + 2.2vw, 2.75rem)", { lineHeight: "1.1", letterSpacing: "-0.02em" }],
       },
       borderRadius: {
         lg: "var(--radius)",

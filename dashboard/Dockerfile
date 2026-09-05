@@ -1,8 +1,9 @@
-# Build-Stage: Abhängigkeiten (kein Lockfile im Repo -> npm install)
+# Build-Stage: Abhängigkeiten. Mit Lockfile und npm ci, damit ein transitives Update
+# nicht unbemerkt in den nächsten Container-Build rutscht.
 FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json .npmrc ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --no-audit --no-fund
 
 # Build-Stage: Next.js (standalone)
 FROM node:22-alpine AS builder

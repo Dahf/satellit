@@ -1,0 +1,174 @@
+import "server-only";
+import fs from "node:fs";
+import path from "node:path";
+
+// Spiegel der Dataclasses aus satellit/decisions.py und satellit/view.py.
+// Die Oberfläche leitet nichts mehr selbst ab — sie zeigt an, was dort entschieden wurde.
+
+export const DATA_DIR = process.env.DATA_DIR || "/data";
+
+export type Verdikt =
+  | "KAUFEN" | "VERKAUFEN" | "HALTEN" | "STOP_ANHEBEN"
+  | "NACHKAUFEN" | "WARTEN" | "NICHT_KAUFEN" | "PRUEFEN";
+
+export interface Beleg {
+  label: string;
+  wert: string;
+  erfuellt: boolean | null;
+  regel: string;
+}
+
+export interface ChartSpec {
+  typ: string;
+  punkte: { d: string; kurs: number | null; sma10w: number | null }[];
+  linien: { y: number | null; label: string; ton: string }[];
+  hinweis: string;
+}
+
+export interface Feld {
+  name: string;
+  label: string;
+  typ: "dezimal" | "ganzzahl" | "datum" | "text";
+  wert: string | number | null;
+  pflicht: boolean;
+}
+
+export interface AktionSpec {
+  aktion: string;
+  label: string;
+  felder: Feld[];
+  body: Record<string, unknown>;
+  bestaetigung: string;
+}
+
+export interface Entscheidung {
+  schluessel: string;
+  art: string;
+  topf: string;
+  verdikt: Verdikt;
+  verdikt_label: string;
+  dringlichkeit: number;
+  begruendung: string;
+  symbol: string;
+  isin: string;
+  name: string;
+  region: string | null;
+  waehrung: string | null;
+  sektor: string | null;
+  hinweise: string[];
+  belege: Beleg[];
+  regeln: string[];
+  chart: ChartSpec | null;
+  stueck: number | null;
+  betrag_eur: number | null;
+  limit_kurs: number | null;
+  stop_kurs: number | null;
+  neuer_stop: number | null;
+  kurs: number | null;
+  wert_eur: number | null;
+  einstand_eur: number | null;
+  gewinn_eur: number | null;
+  gewinn_pct: number | null;
+  ampel: string | null;
+  ampel_label: string | null;
+  aktion: AktionSpec | null;
+  gesperrt_weil: string | null;
+}
+
+export interface Ampel {
+  region: string;
+  raw: string | null;
+  effective: string | null;
+  label: string;
+  uptrend: number | null;
+  breadth: number | null;
+  p200: number | null;
+  p50: number | null;
+  idx_above: boolean | null;
+  note: string;
+}
+
+export interface View {
+  schema: number;
+  as_of: string;
+  erzeugt: string;
+  demo: boolean;
+  portfolio: {
+    satellit_eur: number | null;
+    gebunden_eur: number | null;
+    cash_eur: number | null;
+    hoch_eur: number | null;
+    drawdown: number | null;
+    positionen: { offen: number; max: number };
+    offenes_risiko_pct: number | null;
+    offenes_risiko_max_pct: number | null;
+    kern_eur: number | null;
+    gesamt_eur: number | null;
+  };
+  monat: unknown | null;
+  gewinn: unknown | null;
+  ampel: Record<string, Ampel>;
+  entscheidungen: Entscheidung[];
+  abgelehnt: Entscheidung[];
+  screener_trichter: Record<string, number>;
+  sperren: {
+    kill_switch: { aktiv: boolean; grund: string };
+    trockenlauf: { aktiv: boolean; bis: string | null };
+  };
+  daten: {
+    fx: { kurse: Record<string, number>; quelle: string };
+    universum: Record<string, { quelle: string | null; alter_tage: number | null; anzahl: number; ok: boolean }>;
+    universum_warnungen: string[];
+    fehlende_symbole: Record<string, string>;
+    hinweise: string[];
+    kurse_alter_tage: number | null;
+    letzter_lauf: string;
+    bericht: string | null;
+  };
+}
+
+// Wort UND Zeichen — nie nur Farbe. Der Ausdruck und Farbfehlsichtigkeit sollen es tragen.
+export const VERDIKT: Record<Verdikt, { ton: "kaufen" | "verkauf" | "achtung" | "neutral"; zeichen: string }> = {
+  KAUFEN: { ton: "kaufen", zeichen: "▲" },
+  NACHKAUFEN: { ton: "kaufen", zeichen: "＋" },
+  VERKAUFEN: { ton: "verkauf", zeichen: "▼" },
+  STOP_ANHEBEN: { ton: "achtung", zeichen: "↑" },
+  PRUEFEN: { ton: "achtung", zeichen: "?" },
+  HALTEN: { ton: "neutral", zeichen: "•" },
+  WARTEN: { ton: "neutral", zeichen: "⏸" },
+  NICHT_KAUFEN: { ton: "neutral", zeichen: "–" },
+};
+
+/** "Trading-Plan 5.2" -> "TP 5.2" für die schmale Regel-Spalte. */
+export function regelKurz(regel: string): string {
+  return regel
+    .replace(/^Trading-Plan\s*/i, "TP ")
+    .replace(/^KERN\.md\s*/i, "Kern ")
+    .replace(/^Leitsatz\s*/i, "LS ")
+    .trim();
+}
+
+export function getView(): View | null {
+  const datei = path.join(DATA_DIR, "view_latest.json");
+  try {
+    return JSON.parse(fs.readFileSync(datei, "utf-8")) as View;
+  } catch {
+    return null;
+  }
+}
+
+export interface Laufstatus {
+  running?: boolean;
+  ok?: boolean;
+  error?: string | null;
+  finished?: string;
+  fortschritt?: { geladen: number; gesamt: number } | null;
+}
+
+export function getLaufstatus(): Laufstatus {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, "run_status.json"), "utf-8")) as Laufstatus;
+  } catch {
+    return {};
+  }
+}

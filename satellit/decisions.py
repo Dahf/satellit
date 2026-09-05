@@ -422,11 +422,37 @@ def urteil_cash(ctx: Kontext) -> Decision | None:
 
 
 # --------------------------------------------------------------------------- Zusammenbau
+def urteil_einrichtung(ctx: Kontext) -> Decision | None:
+    """Ohne hinterlegtes Kapital rechnet das System keine Positionsgrößen.
+
+    Ohne diese Zeile bliebe die Ansicht komplett leer und der Grund stünde nur versteckt
+    unter den Ablehnungen — der Nutzer sähe eine leere Seite und wüsste nicht, warum.
+    """
+    if ctx.equity_eur:
+        return None
+    return Decision(
+        schluessel="SETUP:kapital", art="einrichtung", topf="SATELLIT",
+        verdikt=PRUEFEN, verdikt_label="Einrichten", dringlichkeit=SOFORT,
+        name="Satelliten-Kapital hinterlegen",
+        begruendung=("Ohne Kapitalbetrag kann das System keine Stückzahlen berechnen — deshalb gibt es "
+                     "noch keine Kaufvorschläge. Trag ein, wie viel Geld im Satelliten steckt."),
+        hinweise=["Laut Plan sind das rund 10 % deines Gesamtportfolios."],
+        regeln=["Trading-Plan 1", "Trading-Plan 6"],
+        aktion=AktionSpec(
+            aktion="account", label="Kapital eintragen",
+            felder=[_feld("equity", "Satelliten-Kapital in EUR", "dezimal", None, True)],
+            bestaetigung="",
+        ),
+    )
+
+
 def alle_urteile(positionen: list[PositionView], kandidaten: list[Proposal],
                  abgelehnt: list[SkipInfo], ctx: Kontext) -> tuple[list[Decision], list[Decision]]:
     """(Entscheidungen, Ablehnungen). Sortiert nach Dringlichkeit, innerhalb davon stabil."""
     out = [urteil_satellit_position(p, ctx) for p in positionen]
     out += [urteil_satellit_kandidat(p, ctx) for p in kandidaten]
+    if einrichtung := urteil_einrichtung(ctx):
+        out.append(einrichtung)
     cash = urteil_cash(ctx)
     if cash:
         out.append(cash)

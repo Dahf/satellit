@@ -161,6 +161,18 @@ class TestZusammenbau(unittest.TestCase):
         finally:
             dec.urteil_cash = original
 
+    def test_ohne_kapital_gibt_es_eine_anleitung_statt_leere(self):
+        """Sonst zeigt die Startseite nichts an und der Grund steht nur unter den Ablehnungen."""
+        out, _ = dec.alle_urteile([], [], [], kontext(equity_eur=None, cash_eur=None))
+        einrichtung = [d for d in out if d.art == "einrichtung"]
+        self.assertEqual(len(einrichtung), 1)
+        self.assertEqual(einrichtung[0].dringlichkeit, dec.SOFORT)
+        self.assertEqual(einrichtung[0].aktion.aktion, "account")
+
+    def test_mit_kapital_keine_einrichtungszeile(self):
+        out, _ = dec.alle_urteile([], [], [], kontext(equity_eur=10_000.0))
+        self.assertFalse([d for d in out if d.art == "einrichtung"])
+
     def test_cash_zeile_erlaubt_nichtstun(self):
         out, _ = dec.alle_urteile([], [], [], kontext(cash_eur=2000.0))
         cash = [d for d in out if d.art == "cash"]

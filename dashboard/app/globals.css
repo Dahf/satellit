@@ -2,45 +2,82 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Farbidee: kühles Papier, Tinte, und gesättigte Farbe ausschließlich dort, wo eine
+   Handlung nötig ist. Ein Handelsterminal-Look würde genau das Verhalten einladen,
+   das der Trading-Plan verbietet — Zuschauen und Reagieren. */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 72.2% 50.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.5rem;
+    --background: 220 20% 97%;      /* Papier */
+    --foreground: 215 22% 11%;      /* Tinte */
+    --card: 0 0% 100%;              /* Blatt */
+    --card-foreground: 215 22% 11%;
+    --primary: 215 22% 11%;
+    --primary-foreground: 220 20% 97%;
+    --secondary: 214 26% 95%;
+    --secondary-foreground: 215 22% 11%;
+    --muted: 214 26% 95%;
+    --muted-foreground: 213 11% 39%;
+    --accent: 214 26% 95%;
+    --accent-foreground: 215 22% 11%;
+    --destructive: 6 59% 44%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 213 21% 90%;
+    --input: 213 21% 90%;
+    --ring: 213 11% 39%;
+    --radius: 0.375rem;
+
+    /* Regel-Marginalie am linken Rand jeder Entscheidung */
+    --rail: 214 26% 95%;
+
+    /* Handlungssignale. Wort und Zeichen tragen die Bedeutung mit — nie nur die Farbe. */
+    --kaufen: #17694f;
+    --kaufen-weich: #e6f2ed;
+    --verkauf: #b23a2e;
+    --verkauf-weich: #fbeae7;
+    --achtung: #a56a08;
+    --achtung-weich: #fbf1de;
+    --neutral: #6b7683;
+    --neutral-weich: #eef1f5;
+
+    /* Diagrammlinien */
+    --linie-kurs: #2f5fa8;
+    --linie-schnitt: #9aa5b1;
   }
+
+  :root[data-theme="dark"],
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    --background: 213 22% 8%;
+    --foreground: 210 18% 94%;
+    --card: 215 21% 11%;
+    --card-foreground: 210 18% 94%;
+    --primary: 210 18% 94%;
+    --primary-foreground: 213 22% 8%;
+    --secondary: 214 20% 14%;
+    --secondary-foreground: 210 18% 94%;
+    --muted: 214 20% 14%;
+    --muted-foreground: 213 12% 64%;
+    --accent: 214 20% 14%;
+    --accent-foreground: 210 18% 94%;
+    --destructive: 8 62% 62%;
+    --destructive-foreground: 213 22% 8%;
+    --border: 212 18% 18%;
+    --input: 212 18% 18%;
+    --ring: 213 12% 64%;
+
+    --rail: 214 20% 14%;
+
+    --kaufen: #4cb48d;
+    --kaufen-weich: #10261f;
+    --verkauf: #e0705f;
+    --verkauf-weich: #2b1614;
+    --achtung: #dca23c;
+    --achtung-weich: #2a2010;
+    --neutral: #8b96a3;
+    --neutral-weich: #1b222a;
+
+    --linie-kurs: #6f9fe0;
+    --linie-schnitt: #6c7885;
   }
 }
 
@@ -50,5 +87,31 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "kern", "liga";
+  }
+  /* Zahlen sollen in Tabellen untereinander stehen. */
+  .zahl {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+}
+
+@layer components {
+  /* Die Regel-Spalte: Fundstelle im Trading-Plan als ständige Marginalie.
+     Jede Entscheidung stammt aus einer nummerierten Regel — das ist der Rahmen
+     der Seite, keine Verzierung. */
+  .regel-rail {
+    background:
+      linear-gradient(to right, hsl(var(--rail)) 0 100%) left / var(--rail-breite, 5.5rem) 100% no-repeat;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .einblenden {
+    animation: einblenden 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
+  @keyframes einblenden {
+    from { opacity: 0; transform: translateY(0.35rem); }
+    to   { opacity: 1; transform: none; }
   }
 }
