@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import journal, regime, view
+from . import decisions as dec
+from . import journal, portfolio, regime, view
 from .api import run_weekly_job, serve_api, write_run_status
 from .config import Settings, load_settings
 from .data import build_source, update_prices
@@ -57,6 +58,89 @@ def cmd_weekly(a, s: Settings) -> int:
     write_run_status(s, running=False, ok=True, finished=datetime.now().isoformat(timespec="seconds"),
                      as_of=res.as_of.isoformat(), report=path, pushed=pushed, candidates=len(res.proposals),
                      failed_symbols=len(res.data_failed), demo=a.demo)
+    return 0
+
+
+def cmd_portfolio(a, s: Settings) -> int:
+    """Kern-Portfolio anzeigen oder einrichten."""
+    if a.unterbefehl == "setup":
+        plan = portfolio.lade_plan(s)
+        if plan.onboarding_erledigt and not a.force:
+            print("Portfolio ist bereits eingerichtet. Mit --force überschreiben.")
+            return 1
+        katalog = {e["isin"]: e for e in portfolio.lade_etf_katalog(s)}
+        etf = katalog.get(a.etf)
+        if etf is None:
+            print(f"ETF {a.etf} nicht im Katalog. Bekannt:")
+            for e in katalog.values():
+                print(f"  {e['isin']}  {e['name']}")
+            return 1
+        kern = round(a.start * float(s.get("portfolio.core_share", 0.90)), 2)
+        plan = portfolio.Plan(
+            start_datum=date.today().isoformat(), monatsrate_eur=float(a.rate),
+            sparplan_tag=int(a.sparplan_tag),
+            etf={"isin": etf["isin"], "symbol": etf["symbol"], "name": etf["name"],
+                 "anteil_kern": float(a.etf_anteil)},
+            startbetrag={"modus": "einmalkauf", "kern_eur": kern,
+                         "satellit_eur": round(a.start - kern, 2),
+                         "ersteinstieg_aktien_offen": float(a.etf_anteil) < 1.0},
+            onboarding_erledigt=True,
+        )
+        portfolio.speichere_plan(s, plan)
+        n = portfolio.schreibe_buchungen(s, portfolio.startbetrag_buchungen(plan, date.today()))
+        print(f"Eingerichtet: {etf['name']}, Rate {a.rate} EUR/Monat, {n} Eröffnungsbuchungen.")
+        return 0
+
+    z = portfolio.zusammenfassung(s)
+    w, plan = z["werte"], z["plan"]
+    if not plan.onboarding_erledigt:
+        print("Noch nicht eingerichtet — `satellit portfolio setup --start … --rate … --etf <ISIN>`")
+        return 0
+    e = lambda x: f"{dec.zahl(x, 2):>14} EUR"
+    print(f"Gesamtwert   {e(w.gesamt_eur)}")
+    print(f"  Kern       {e(w.kern_eur)}  ({dec.prozent(w.kern_pct)})")
+    print(f"    ETF      {e(w.kern_etf_eur)}")
+    print(f"    Aktien   {e(w.kern_aktien_eur)}  (+ {dec.zahl(w.kern_aktien_cash_eur)} EUR Cash bereit)")
+    print(f"  Satellit   {e(w.satellit_eur)}  ({dec.prozent(w.satellit_pct)})")
+    print(f"  Cash       {e(w.cash_eur)}")
+    g = z["gewinn"]
+    print(f"\nEingezahlt   {e(g['eingezahlt_netto_eur'])}")
+    print(f"Gewinn       {e(g['gewinn_eur'])}"
+          + (f"  ({dec.prozent(g['xirr_pct'])} p. a.)" if g["xirr_pct"] is not None else ""))
+    m = z["monat"]
+    print(f"\n{m['monat']}: {dec.zahl(m['ausgegeben_eur'])} EUR ausgegeben"
+          + (f", {dec.zahl(m['offen_eur'])} EUR offen" if m["offen_eur"] else ""))
+    f = z["kauffenster"]
+    print("Kauffenster Kern-Aktien: " + (f"offen ({f['grund']})" if f["offen"]
+                                         else f"geschlossen, nächstes {f['naechstes']}"))
+    print(f"Band Kern/Satellit: {z['band']['status']}")
+    if w.nicht_bewertbar:
+        print(f"⚠️ ohne Kurs bewertet: {', '.join(w.nicht_bewertbar)}")
+    return 0
+
+
+def cmd_ledger(a, s: Settings) -> int:
+    """Kassenbuch anzeigen oder ergänzen."""
+    if a.unterbefehl == "add":
+        b = portfolio.Buchung(datum=a.datum or date.today().isoformat(), typ=a.typ, topf=a.topf,
+                              betrag_eur=float(a.betrag), isin=a.isin or "", symbol=a.symbol or "",
+                              stueck=float(a.stueck or 0), kurs=float(a.kurs or 0),
+                              gebuehr_eur=float(a.gebuehr or 0), notiz=a.notiz or "", quelle="cli")
+        portfolio.schreibe_buchung(s, b)
+        print(f"gebucht: {b.datum} {b.typ} {b.topf} {b.betrag_eur:.2f} EUR  [{b.quelle_id}]")
+        return 0
+    if a.unterbefehl == "storno":
+        g = portfolio.storniere(s, a.schluessel, a.notiz or "manuell")
+        print(f"storniert: {a.schluessel} -> Gegenbuchung {g.quelle_id}")
+        return 0
+    buchungen = portfolio.lies_ledger(s)
+    if a.monat:
+        buchungen = [b for b in buchungen if b.datum[:7] == a.monat]
+    for b in buchungen:
+        print(f"{b.datum}  {b.typ:16} {b.topf:10} {dec.zahl(b.betrag_eur):>12}"
+              + f"  {b.symbol or b.isin:12} {b.notiz[:30]:30} [{b.quelle_id}]")
+    print(f"\n{len(buchungen)} Buchungen · Cash je Topf: "
+          + ", ".join(f"{k} {dec.zahl(v)}" for k, v in portfolio.cash_je_topf(buchungen).items()))
     return 0
 
 
@@ -292,6 +376,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("view", help="Ansicht (state/view_latest.json) ohne Netz neu bauen")
     v.set_defaults(func=cmd_view)
+
+    pf_ = sub.add_parser("portfolio", help="Kern-Portfolio anzeigen/einrichten")
+    pfs = pf_.add_subparsers(dest="unterbefehl")
+    pfs.add_parser("show")
+    setup = pfs.add_parser("setup", help="Ersteinrichtung")
+    setup.add_argument("--start", type=float, required=True, help="Startbetrag gesamt in EUR")
+    setup.add_argument("--rate", type=float, required=True, help="Monatsrate in EUR")
+    setup.add_argument("--etf", required=True, help="ISIN aus config/etf_universe.yaml")
+    setup.add_argument("--etf-anteil", dest="etf_anteil", type=float, default=0.8,
+                       help="Anteil des Kerns im ETF (>= 0.8, KERN.md 1)")
+    setup.add_argument("--sparplan-tag", dest="sparplan_tag", type=int, default=1)
+    setup.add_argument("--force", action="store_true")
+    pf_.set_defaults(func=cmd_portfolio, unterbefehl="show")
+
+    lg = sub.add_parser("ledger", help="Kassenbuch anzeigen/ergänzen")
+    lgs = lg.add_subparsers(dest="unterbefehl")
+    lst = lgs.add_parser("list"); lst.add_argument("--monat", default=None)
+    add = lgs.add_parser("add")
+    add.add_argument("--typ", required=True, choices=sorted(portfolio.TYPEN))
+    add.add_argument("--topf", required=True, choices=sorted(portfolio.TOEPFE))
+    add.add_argument("--betrag", type=float, required=True)
+    add.add_argument("--datum", default=None)
+    add.add_argument("--isin", default=None); add.add_argument("--symbol", default=None)
+    add.add_argument("--stueck", type=float, default=0); add.add_argument("--kurs", type=float, default=0)
+    add.add_argument("--gebuehr", type=float, default=0); add.add_argument("--notiz", default=None)
+    sto = lgs.add_parser("storno")
+    sto.add_argument("schluessel"); sto.add_argument("--notiz", default=None)
+    lg.set_defaults(func=cmd_ledger, unterbefehl="list", monat=None)
 
     u = sub.add_parser("universe", help="Konstituenten laden/prüfen/importieren")
     u.add_argument("--force", action="store_true")

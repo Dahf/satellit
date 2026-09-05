@@ -75,6 +75,20 @@ class Account:
         if self.high_water_mark is None or value > self.high_water_mark:
             self.high_water_mark = float(value)
 
+    def einlage(self, betrag: float) -> None:
+        """Ein- oder Auszahlung in den Satelliten (negativ = Entnahme).
+
+        Der Höchststand wandert um denselben Betrag mit. Ohne das sähe eine Einzahlung wie
+        ein Gewinn aus: das Kapital steigt, der Höchststand rastet auf dem neuen Wert ein,
+        und der Drawdown-Kill-Switch (Trading-Plan 10.2) misst danach dauerhaft an einer
+        Marke, die nie durch Kursgewinne erreicht wurde.
+        """
+        self.satellite_equity_eur = float(self.satellite_equity_eur or 0.0) + float(betrag)
+        if self.high_water_mark is not None:
+            self.high_water_mark = max(0.0, float(self.high_water_mark) + float(betrag))
+        elif betrag > 0:
+            self.high_water_mark = float(betrag)
+
     @property
     def drawdown(self) -> float | None:
         if not self.satellite_equity_eur or not self.high_water_mark:
@@ -104,6 +118,18 @@ def open_positions(settings: Settings) -> list[dict]:
 
 def closed_theses(settings: Settings) -> list[dict]:
     return [t for t in list_theses(settings, "CLOSED") if (t.get("setup_type") or "") != "core_holding"]
+
+
+def core_positions(settings: Settings) -> list[dict]:
+    """Kern-Aktien — das Gegenstück zu open_positions().
+
+    Der Ausschluss in open_positions() und closed_theses() bleibt bewusst bestehen:
+    Kill-Switch, Expectancy und offenes Risiko sind laut Trading-Plan 10.2 ausdrücklich
+    Kennzahlen des Satelliten. Kern-Aktien dort mitzuzählen wäre ein stiller Regelbruch.
+    """
+    theses = (list_theses(settings, "ACTIVE") + list_theses(settings, "PARTIALLY_CLOSED")
+              + list_theses(settings, "ENTRY_READY"))
+    return [t for t in theses if (t.get("setup_type") or "") == "core_holding"]
 
 
 def provenance(thesis: dict) -> dict:

@@ -67,6 +67,7 @@ def bauen(res, settings: Settings) -> dict:
     acc = res.account
     equity = acc.satellite_equity_eur
     gebunden = sum(p.wert_eur or 0.0 for p in res.positions)
+    kw = ((res.kern or {}).get("werte") or {})       # leer, solange nichts eingerichtet ist
     trichter = {}
     if res.table is not None and not res.table.empty:
         t = res.table
@@ -86,21 +87,31 @@ def bauen(res, settings: Settings) -> dict:
         "demo": res.demo,
         # Phase 2 füllt Kern, Monatsbudget und Gewinn. Die Schlüssel stehen schon hier,
         # damit die Oberfläche nicht später ihre Form ändern muss.
-        "onboarding_noetig": None,
+        "onboarding_noetig": not bool((res.kern or {}).get("eingerichtet")),
         "portfolio": {
-            "satellit_eur": equity,
+            "satellit_eur": kw.get("satellit_eur", equity),
             "gebunden_eur": gebunden,
-            "cash_eur": max(0.0, equity - gebunden) if equity else None,
+            "cash_eur": kw.get("cash_eur", max(0.0, equity - gebunden) if equity else None),
             "hoch_eur": acc.high_water_mark,
             "drawdown": acc.drawdown,
             "positionen": {"offen": len(res.positions),
                            "max": int(settings.get("risk.max_positions", 5))},
             "offenes_risiko_pct": res.open_risk_pct,
             "offenes_risiko_max_pct": float(settings.get("risk.max_open_risk_pct", 5.0)),
-            "kern_eur": None, "gesamt_eur": None,       # Phase 2
+            "kern_eur": kw.get("kern_eur"),
+            "kern_etf_eur": kw.get("kern_etf_eur"),
+            "kern_aktien_eur": kw.get("kern_aktien_eur"),
+            "kern_aktien_cash_eur": kw.get("kern_aktien_cash_eur"),
+            "gesamt_eur": kw.get("gesamt_eur"),
+            "kern_pct": kw.get("kern_pct"),
+            "satellit_pct": kw.get("satellit_pct"),
+            "band": (res.kern or {}).get("band") or {},
+            "kauffenster": (res.kern or {}).get("kauffenster") or {},
         },
-        "monat": None,                                   # Phase 2
-        "gewinn": None,                                  # Phase 2
+        "monat": (res.kern or {}).get("monat"),
+        "gewinn": (res.kern or {}).get("gewinn"),
+        "sparplan": (res.kern or {}).get("sparplan"),
+        "etf": (res.kern or {}).get("etf"),
         "ampel": {r: {**asdict(rd), "label": rd.label} for r, rd in res.readings.items()},
         "entscheidungen": [asdict(d) for d in res.entscheidungen],
         "abgelehnt": [asdict(d) for d in res.abgelehnt],

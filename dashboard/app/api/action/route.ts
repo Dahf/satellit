@@ -9,6 +9,10 @@ const ALLOWED: Record<string, string> = {
   account: "/account",
   "run.weekly": "/run/weekly",
   "universe.import": "/universe/import",
+  "ledger.add": "/ledger/add",
+  "ledger.storno": "/ledger/storno",
+  "depot.abgleich": "/depot/abgleich",
+  "portfolio.setup": "/portfolio/setup",
 };
 
 export async function POST(req: NextRequest) {

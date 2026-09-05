@@ -7,6 +7,9 @@ portfolio:
   satellite_share: 0.10
   satellite_band_low: 0.07      # unter 7 %  -> im Januar auffüllen (nur ohne Kill-Switch)
   satellite_band_high: 0.15     # über 15 %  -> Überschuss in den Kern
+  max_core_stock_pct: 0.05      # Regel 3.3: je Kern-Aktie höchstens 5 % des Gesamtportfolios
+  max_core_stocks_share: 0.20   # KERN.md 1: Einzelaktien höchstens 20 % des Kerns
+  core_review_days: 180         # KERN.md 6: halbjährlicher Review je Kern-Aktie
 
 universe:
   regions:

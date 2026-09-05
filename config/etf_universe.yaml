@@ -1,0 +1,108 @@
+# Welt-ETF-Katalog für das Onboarding — Auswahl und Kennzahlen aus docs/KERN.md, Abschnitt 3.
+#
+# Die Datei ist statisch, damit die Ersteinrichtung ohne Netz funktioniert. Sie ist eine
+# Auswahlhilfe, keine Empfehlung: die Entscheidung trifft der Depotinhaber (KERN.md, Kopf).
+#
+# Die Yahoo-Symbole wurden am 05.09.2026 gegen echte Kursreihen geprüft — ohne gültiges
+# Symbol kann das System den ETF-Bestand nicht bewerten.
+#
+# ertrag: thesaurierend | ausschuettend
+# gruppe: welt        -> deckt als einzelner ETF den Kern ab (KERN.md 3.1)
+#         baustein    -> nur in Kombination sinnvoll (KERN.md 3.2, Varianten B/C)
+
+etfs:
+  - isin: IE00BK5BQT80
+    symbol: VWCE.DE
+    name: "Vanguard FTSE All-World Acc"
+    index: "FTSE All-World"
+    ter: 0.0014
+    ertrag: thesaurierend
+    positionen: 3758
+    gruppe: welt
+    hinweis: "Referenzvariante: ein ETF, kein Rebalancing, inklusive Schwellenländer."
+
+  - isin: IE00B3RBWM25
+    symbol: VGWL.DE
+    name: "Vanguard FTSE All-World Dist"
+    index: "FTSE All-World"
+    ter: 0.0014
+    ertrag: ausschuettend
+    positionen: 3758
+    gruppe: welt
+    hinweis: "Wie oben, schüttet aus — nutzt den Sparerpauschbetrag von selbst aus."
+
+  - isin: IE00B6R52259
+    symbol: IUSQ.DE
+    name: "iShares MSCI ACWI Acc"
+    index: "MSCI ACWI"
+    ter: 0.0020
+    ertrag: thesaurierend
+    positionen: 1681
+    gruppe: welt
+    hinweis: "Weniger Einzeltitel als FTSE All-World, längste Kostenhistorie."
+
+  - isin: IE00B3YLTY66
+    symbol: SPYI.DE
+    name: "SPDR MSCI ACWI IMI Acc"
+    index: "MSCI ACWI IMI"
+    ter: 0.0017
+    ertrag: thesaurierend
+    positionen: 4957
+    gruppe: welt
+    hinweis: "Breiteste Abdeckung: enthält zusätzlich Small Caps."
+
+  - isin: IE000716YHJ7
+    symbol: FWIA.DE
+    name: "Invesco FTSE All-World Acc"
+    index: "FTSE All-World"
+    ter: 0.0015
+    ertrag: thesaurierend
+    positionen: 2353
+    gruppe: welt
+    hinweis: "Junger Fonds, erst seit 2023 — kurze Historie."
+
+  - isin: IE0003XJA0J9
+    symbol: WEBN.DE
+    name: "Amundi Prime All Country World Acc"
+    index: "Solactive GBS Global Markets L&M"
+    ter: 0.0007
+    ertrag: thesaurierend
+    positionen: 3432
+    gruppe: welt
+    hinweis: "Günstigste laufende Kosten, aber kleinster Fonds und noch keine Kostenhistorie."
+
+  - isin: IE00B4L5Y983
+    symbol: EUNL.DE
+    name: "iShares Core MSCI World Acc"
+    index: "MSCI World (Industrieländer)"
+    ter: 0.0020
+    ertrag: thesaurierend
+    gruppe: baustein
+    hinweis: "Nur Industrieländer — braucht einen Schwellenländer-Baustein daneben."
+
+  - isin: IE00BKM4GZ66
+    symbol: IS3N.DE
+    name: "iShares Core MSCI EM IMI Acc"
+    index: "MSCI EM IMI"
+    ter: 0.0018
+    ertrag: thesaurierend
+    gruppe: baustein
+    hinweis: "Schwellenländer-Ergänzung zum MSCI World."
+
+  - isin: IE00BF4RFH31
+    symbol: IUSN.DE
+    name: "iShares MSCI World Small Cap Acc"
+    index: "MSCI World Small Cap"
+    ter: 0.0035
+    ertrag: thesaurierend
+    gruppe: baustein
+    hinweis: "Small-Cap-Ergänzung; ein ACWI-IMI-ETF liefert dasselbe mit einem Produkt."
+
+  - isin: IE0006WW1TQ4
+    symbol: EXUS.DE
+    name: "Xtrackers MSCI World ex USA 1C"
+    index: "MSCI World ex USA"
+    ter: 0.0015
+    ertrag: thesaurierend
+    gruppe: baustein
+    hinweis: "Regionenwette — laut Trading-Plan Abschnitt 2 nicht vorgesehen."

@@ -13,7 +13,7 @@ import pandas as pd
 
 from . import decisions as dec
 from . import indicators as ind
-from . import journal, regime
+from . import journal, portfolio, regime
 from .config import Settings
 from .decisions import Decision, Kontext, SkipInfo
 from .data import NullSource, PriceSource, SyntheticSource, build_source, update_prices
@@ -98,6 +98,7 @@ class WeeklyResult:
     entscheidungen: list[Decision] = field(default_factory=list)
     abgelehnt: list[Decision] = field(default_factory=list)
     fx_kurse: dict[str, float] = field(default_factory=dict)
+    kern: dict = field(default_factory=dict)      # Werte, Monat, Gewinn, Band, Kauffenster
     digest_md: str | None = None
     report_path: str | None = None
     demo: bool = False
@@ -175,6 +176,103 @@ def review_positions(settings: Settings, frames: dict[str, pd.DataFrame], fx: Fx
         view.gewinn_eur = (view.wert_eur - view.einstand_eur) if view.einstand_eur is not None else None
         out.append(view)
     return out
+
+
+def _kern_zusammenfassung(settings: Settings, ctx: Kontext, as_of: date) -> dict:
+    """Kernzahlen für das Anzeige-Payload. Leer, solange nichts eingerichtet ist."""
+    if ctx.kern_plan is None or ctx.kern_werte is None:
+        return {}
+    w = ctx.kern_werte
+    buchungen = portfolio.lies_ledger(settings)
+    return {
+        "eingerichtet": True,
+        "werte": {
+            "gesamt_eur": w.gesamt_eur, "kern_eur": w.kern_eur, "kern_etf_eur": w.kern_etf_eur,
+            "kern_aktien_eur": w.kern_aktien_eur, "satellit_eur": w.satellit_eur,
+            "cash_eur": w.cash_eur, "cash_je_topf": w.cash_je_topf,
+            "kern_pct": w.kern_pct, "satellit_pct": w.satellit_pct,
+            "kern_aktien_cash_eur": w.kern_aktien_cash_eur,
+            "nicht_bewertbar": w.nicht_bewertbar,
+        },
+        "monat": ctx.kern_monat,
+        "gewinn": portfolio.performance(w, buchungen, as_of),
+        "band": ctx.band,
+        "kauffenster": ctx.kauffenster,
+        "sparplan": {"tag": ctx.kern_plan.sparplan_tag, "offen": ctx.sparplan_offen,
+                     "rate_eur": ctx.kern_plan.monatsrate_eur},
+        "etf": ctx.kern_plan.etf,
+    }
+
+
+def _kern_symbole(settings: Settings) -> list[str]:
+    """ETF und Kern-Aktien — sie brauchen Kurse, stehen aber nicht im Screener-Universum."""
+    out: list[str] = []
+    plan = portfolio.lade_plan(settings)
+    if plan.etf_symbol:
+        out.append(plan.etf_symbol)
+    for t in journal.core_positions(settings):
+        s = journal.provenance(t).get("symbol") or t.get("ticker")
+        if s:
+            out.append(s)
+    return out
+
+
+def _kern_kontext(settings: Settings, ctx: Kontext, frames: dict[str, pd.DataFrame],
+                  positionen: list[PositionView], as_of: date) -> None:
+    """Kern-Teil des Entscheidungskontexts füllen. Ohne eingerichteten Plan passiert nichts."""
+    plan = portfolio.lade_plan(settings)
+    if not plan.onboarding_erledigt:
+        return
+    buchungen = portfolio.lies_ledger(settings)
+
+    kurse: dict[str, float] = {}
+    for symbol in set(_kern_symbole(settings)):
+        df = frames.get(symbol)
+        if df is not None and not df.empty:
+            reihe = df[df.index.date <= as_of]
+            if not reihe.empty:
+                kurse[symbol] = float(reihe["close"].iloc[-1])
+
+    sat_wert = sum(p.wert_eur or 0.0 for p in positionen)
+    werte = portfolio.bewerte(settings, plan, buchungen, kurse, satellit_positionen_eur=sat_wert)
+    band = portfolio.band_pruefung(werte, settings)
+
+    monat = as_of.strftime("%Y-%m")
+    besitz = portfolio.bestaende(buchungen)
+    etf_gekauft = any(b.topf == "kern_etf" for b in besitz.values())
+    startbetrag = plan.startbetrag or {}
+    etf_soll = float(startbetrag.get("kern_eur") or 0.0) * plan.etf_anteil
+    aktien_soll = float(startbetrag.get("kern_eur") or 0.0) - etf_soll
+
+    thesen = []
+    for t in journal.core_positions(settings):
+        prov = journal.provenance(t)
+        symbol = prov.get("symbol") or t.get("ticker") or ""
+        pos = besitz.get(f"kern_aktie:{prov.get('isin') or symbol}")
+        wert = None
+        if pos and symbol in kurse:
+            wert = pos.stueck * kurse[symbol]
+        faellig_am = ((t.get("monitoring") or {}).get("next_review_date") or "")[:10]
+        faellig = bool(faellig_am and faellig_am <= as_of.isoformat())
+        thesen.append((t, wert, faellig))
+
+    letzter = (plan.depotwert_abgleich or {}).get("datum")
+    abgleich_faellig = not letzter or (as_of - date.fromisoformat(letzter)).days >= 30
+
+    ctx.kern_plan = plan
+    ctx.kern_werte = werte
+    ctx.band = band
+    ctx.kauffenster = portfolio.kern_kauffenster(as_of, plan)
+    ctx.kern_monat = portfolio.monatsausgaben(buchungen, monat, plan)
+    ctx.sparplan_offen = (bool(plan.monatsrate_eur) and as_of.day >= int(plan.sparplan_tag or 1)
+                          and not portfolio.sparplan_gelaufen(buchungen, monat, plan.etf_isin)
+                          and etf_gekauft)
+    ctx.startbetrag_offen = {
+        "etf_eur": 0.0 if etf_gekauft else etf_soll,
+        "aktien_eur": aktien_soll if plan.ersteinstieg_offen else 0.0,
+    }
+    ctx.kern_thesen = thesen
+    ctx.depot_abgleich_faellig = abgleich_faellig
 
 
 def _firmenname(t: dict, symbol: str) -> str:
@@ -356,6 +454,12 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
         if s not in scales:
             symbols.append(s)
             scales[s] = 1.0
+    # Kern-Titel mit abrufen: ETF und Kern-Aktien stehen nicht im Screener-Universum,
+    # ohne Kurse ließe sich der Kern nicht bewerten.
+    for kern_symbol in _kern_symbole(settings):
+        if kern_symbol not in scales:
+            symbols.append(kern_symbol)
+            scales[kern_symbol] = 1.0
     index_symbols = {}
     for region, cfg in settings.get("universe.regions", {}).items():
         if cfg.get("index_symbol") and not demo:
@@ -429,7 +533,9 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
     # 9. Entscheidungen — hier und nur hier wird geurteilt.
     d_ctx = _entscheidungs_kontext(settings, as_of, readings, risk_by_region, account, blocked, dry_run,
                                    frames, positions, proposals)
+    _kern_kontext(settings, d_ctx, frames, positions, as_of)
     entscheidungen, abgelehnt = dec.alle_urteile(positions, proposals, skipped, d_ctx)
+    kern = _kern_zusammenfassung(settings, d_ctx, as_of)
 
     return WeeklyResult(
         as_of=as_of, readings=readings, account=account, kill_active=blocked, kill_reason=account.kill_switch_reason,
@@ -437,7 +543,8 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
         positions=positions, open_risk_pct=open_risk_pct, universe_size=universe_size, universe_warnings=uni_warn,
         universum_status=uni_status,
         data_failed=failed, data_notes=notes, fx_note=fx.note, regime_notes=regime_notes,
-        entscheidungen=entscheidungen, abgelehnt=abgelehnt, fx_kurse=dict(fx.rates), digest_md=digest_md,
+        entscheidungen=entscheidungen, abgelehnt=abgelehnt, fx_kurse=dict(fx.rates), kern=kern,
+        digest_md=digest_md,
         demo=demo,
     )
 

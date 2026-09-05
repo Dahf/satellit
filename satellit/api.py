@@ -13,11 +13,11 @@ import os
 import threading
 import time
 import traceback
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import journal, regime, universe, view
+from . import journal, portfolio, regime, universe, view
 from .config import Settings
 from .data import build_source
 from .fx import FxTable, load_fx
@@ -195,6 +195,84 @@ def action_universe_import(settings: Settings, body: dict) -> dict:
     return {"region": body.get("region"), "titel": anzahl, "datei": ziel.name}
 
 
+def action_ledger_add(settings: Settings, body: dict) -> dict:
+    """Eine Geldbewegung buchen. Die Prüfung steckt im Buchungstyp selbst."""
+    b = portfolio.Buchung(
+        datum=str(body.get("datum") or date.today().isoformat()),
+        typ=str(body["typ"]), topf=str(body["topf"]),
+        betrag_eur=float(body.get("betrag_eur") or 0), isin=str(body.get("isin") or ""),
+        symbol=str(body.get("symbol") or ""), waehrung=str(body.get("waehrung") or "EUR"),
+        stueck=float(body.get("stueck") or 0), kurs=float(body.get("kurs") or 0),
+        gebuehr_eur=float(body.get("gebuehr_eur") or 0), thesis_id=str(body.get("thesis_id") or ""),
+        notiz=str(body.get("notiz") or ""), quelle="dashboard",
+    )
+    if date.fromisoformat(b.datum) > date.today():
+        raise ValueError("Das Datum liegt in der Zukunft.")
+    portfolio.schreibe_buchung(settings, b)
+    return {"gebucht": b.quelle_id, "typ": b.typ, "topf": b.topf, "betrag_eur": b.betrag_eur}
+
+
+def action_ledger_storno(settings: Settings, body: dict) -> dict:
+    g = portfolio.storniere(settings, str(body["quelle_id"]), str(body.get("notiz") or "Korrektur"))
+    return {"storno": g.quelle_id, "hebt_auf": g.thesis_id}
+
+
+def action_depot_abgleich(settings: Settings, body: dict) -> dict:
+    """Differenz zwischen gerechnetem und tatsächlichem Depotwert als Korrektur buchen.
+
+    Die Gegenmaßnahme gegen vergessene Buchungen: ohne sie driftet das Kassenbuch still
+    vom echten Depot weg, und alle abgeleiteten Zahlen mit ihm.
+    """
+    ist = float(body["wert_eur"])
+    plan = portfolio.lade_plan(settings)
+    z = portfolio.zusammenfassung(settings)
+    soll = z["werte"].gesamt_eur
+    diff = round(ist - soll, 2)
+    heute = date.today().isoformat()
+    if abs(diff) >= 0.01:
+        portfolio.schreibe_buchung(settings, portfolio.Buchung(
+            datum=heute, typ="korrektur", topf="cash", betrag_eur=abs(diff),
+            notiz=f"Depotabgleich: {'Fehlbetrag' if diff > 0 else 'Überhang'} {abs(diff):.2f} EUR",
+            quelle="dashboard"))
+    plan.depotwert_abgleich = {"datum": heute, "wert_eur": ist}
+    portfolio.speichere_plan(settings, plan)
+    return {"gerechnet_eur": soll, "app_eur": ist, "differenz_eur": diff}
+
+
+def action_portfolio_setup(settings: Settings, body: dict) -> dict:
+    """Ersteinrichtung aus dem Onboarding."""
+    plan = portfolio.lade_plan(settings)
+    if plan.onboarding_erledigt and not body.get("force"):
+        raise ValueError("Das Portfolio ist bereits eingerichtet.")
+    katalog = {e["isin"]: e for e in portfolio.lade_etf_katalog(settings)}
+    etf = katalog.get(str(body.get("etf_isin") or ""))
+    if etf is None:
+        raise ValueError("Unbekannte ETF-ISIN — bitte aus der Liste wählen.")
+    anteil = float(body.get("etf_anteil", 0.8))
+    if anteil < 0.8:
+        raise ValueError("Mindestens 80 % des Kerns gehören in den ETF (KERN.md 1).")
+    start = float(body["start_eur"])
+    kern = round(start * float(settings.get("portfolio.core_share", 0.90)), 2)
+    heute = date.today()
+    plan = portfolio.Plan(
+        start_datum=heute.isoformat(), monatsrate_eur=float(body.get("rate_eur") or 0),
+        sparplan_tag=int(body.get("sparplan_tag") or 1),
+        etf={"isin": etf["isin"], "symbol": etf["symbol"], "name": etf["name"], "anteil_kern": anteil},
+        startbetrag={"modus": "einmalkauf", "kern_eur": kern, "satellit_eur": round(start - kern, 2),
+                     "ersteinstieg_aktien_offen": anteil < 1.0},
+        onboarding_erledigt=True,
+    )
+    portfolio.speichere_plan(settings, plan)
+    n = portfolio.schreibe_buchungen(settings, portfolio.startbetrag_buchungen(plan, heute))
+    # Trading-Plan 10.1: mindestens zwei Wochenenden Trockenlauf, bevor Orders zulässig sind.
+    acc = journal.Account.load(settings)
+    acc.dry_run_until = (heute + timedelta(days=14)).isoformat()
+    acc.set_equity(round(start - kern, 2), heute)
+    acc.save(settings)
+    return {"etf": etf["name"], "kern_eur": kern, "satellit_eur": round(start - kern, 2),
+            "buchungen": n, "trockenlauf_bis": acc.dry_run_until}
+
+
 ACTIONS = {
     "/journal/new": action_journal_new,
     "/journal/open": action_journal_open,
@@ -202,6 +280,10 @@ ACTIONS = {
     "/journal/stop": action_journal_stop,
     "/account": action_account,
     "/universe/import": action_universe_import,
+    "/ledger/add": action_ledger_add,
+    "/ledger/storno": action_ledger_storno,
+    "/depot/abgleich": action_depot_abgleich,
+    "/portfolio/setup": action_portfolio_setup,
 }
 
 

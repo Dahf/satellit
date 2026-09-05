@@ -167,6 +167,16 @@ class Kontext:
     soft_exit_wochen: int = 10
     max_positionen: int = 5
     startphase: bool = False           # < risk.start_trades abgeschlossene Trades
+    # --- Kern (Phase 2). Ohne Plan bleibt alles davon leer und es entstehen keine Kern-Zeilen.
+    kern_plan: Any = None              # portfolio.Plan
+    kern_werte: Any = None             # portfolio.Werte
+    kern_monat: dict = field(default_factory=dict)
+    kauffenster: dict = field(default_factory=dict)
+    sparplan_offen: bool = False       # Ausführung dieses Monats fehlt noch
+    startbetrag_offen: dict = field(default_factory=dict)   # {etf_eur, aktien_eur}
+    kern_thesen: list = field(default_factory=list)         # offene core_holding-Thesen
+    depot_abgleich_faellig: bool = False
+    band: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- Hilfen
@@ -421,6 +431,206 @@ def urteil_cash(ctx: Kontext) -> Decision | None:
     )
 
 
+# --------------------------------------------------------------------------- Kern
+# Der Kern kennt keine Ampel. Trading-Plan 2: "Es wird nicht getimt. Sparplan läuft
+# unabhängig von Ampel, Nachrichten und Kursniveau." Deshalb taucht hier nirgends ein
+# Ampel-Beleg auf — er wäre schlicht ohne Bedeutung.
+
+def urteil_kern_startbetrag(ctx: Kontext) -> list[Decision]:
+    """Der Ersteinstieg — die Antwort auf 'irgendwann muss ich doch mal anfangen'."""
+    offen = ctx.startbetrag_offen or {}
+    plan = ctx.kern_plan
+    out: list[Decision] = []
+
+    etf_eur = float(offen.get("etf_eur") or 0.0)
+    if etf_eur > 0 and plan is not None:
+        out.append(Decision(
+            schluessel="KERN:startbetrag_etf", art="kern_startbetrag", topf="KERN",
+            verdikt=KAUFEN, verdikt_label=VERDIKT_LABEL[KAUFEN], dringlichkeit=SOFORT,
+            isin=plan.etf_isin, symbol=plan.etf_symbol, name=plan.etf.get("name") or "Welt-ETF",
+            betrag_eur=etf_eur,
+            begruendung=(f"Leg deinen Kern-Startbetrag an: {zahl(etf_eur, 0)} EUR in "
+                         f"{plan.etf.get('name') or plan.etf_symbol}. Das ist unabhängig von der "
+                         f"Marktlage — der Kern wird nicht getimt."),
+            hinweise=["In der Trade-Republic-App als Einmalkauf, danach hier eintragen.",
+                      "Einmal entscheiden, dann nicht mehr ändern (KERN.md 5.3)."],
+            belege=[
+                Beleg("Warum jetzt", "Der Kern folgt keiner Ampel und keinem Kauffenster.", True,
+                      "Trading-Plan 2"),
+                Beleg("Modus", "Einmalkauf statt gestreckt — so festgelegt.", None, "KERN.md 5.3"),
+            ],
+            regeln=["Trading-Plan 2", "KERN.md 5.3"],
+            aktion=AktionSpec(
+                aktion="ledger.add", label="Kauf eintragen",
+                felder=[_feld("betrag_eur", "Bezahlt (EUR)", "dezimal", round(etf_eur, 2), True),
+                        _feld("stueck", "Anteile laut App", "dezimal", None, True),
+                        _feld("kurs", "Kurs", "dezimal", None, False),
+                        _feld("datum", "Datum", "datum", ctx.as_of.isoformat(), True)],
+                body={"typ": "sparplan", "topf": "kern_etf", "isin": plan.etf_isin,
+                      "symbol": plan.etf_symbol, "notiz": "Startbetrag Kern-ETF"},
+                bestaetigung="Ich habe den Kauf in der App ausgeführt.",
+            ),
+        ))
+
+    aktien_eur = float(offen.get("aktien_eur") or 0.0)
+    if aktien_eur > 0:
+        fenster = ctx.kauffenster or {}
+        hat_these = bool(ctx.kern_thesen)
+        gesperrt = None
+        if not fenster.get("offen"):
+            gesperrt = (f"Kern-Aktien werden nur in der ersten Handelswoche von Januar, April, Juli "
+                        f"und Oktober gekauft. Nächstes Fenster: {fenster.get('naechstes') or '?'}.")
+        elif not hat_these:
+            gesperrt = ("Vor dem Kauf braucht jede Kern-Aktie eine schriftliche These mit "
+                        "Kill-Kriterien (Trading-Plan 3.2). Lege sie zuerst an.")
+        out.append(Decision(
+            schluessel="KERN:startbetrag_aktien", art="kern_startbetrag", topf="KERN",
+            verdikt=KAUFEN if not gesperrt else WARTEN,
+            verdikt_label=VERDIKT_LABEL[KAUFEN if not gesperrt else WARTEN],
+            dringlichkeit=DIESE_WOCHE if not gesperrt else INFO,
+            name="Kern-Aktien aus dem Startbetrag", betrag_eur=aktien_eur,
+            begruendung=(f"{zahl(aktien_eur, 0)} EUR sind für einzelne Kern-Aktien vorgesehen und liegen "
+                         f"bereit." + ("" if gesperrt else " Das Fenster ist offen.")),
+            hinweise=["Je Titel höchstens 5 % des Gesamtportfolios, Einzelaktien höchstens 20 % des Kerns.",
+                      "KERN.md 6 listet sieben Muss-Kriterien, die jeder Titel erfüllen muss."],
+            belege=[
+                Beleg("Kauffenster", {"quartal": "reguläres Quartalsfenster",
+                                      "ersteinstieg": "einmaliger Ersteinstieg (Startbetrag)",
+                                      "geschlossen": f"geschlossen bis {fenster.get('naechstes') or '?'}"}
+                      .get(fenster.get("grund", ""), "unbekannt"),
+                      bool(fenster.get("offen")), "Trading-Plan 3.4"),
+                Beleg("These vorhanden", "ja" if hat_these else "nein — Pflicht vor jedem Kauf",
+                      hat_these, "Trading-Plan 3.2"),
+            ],
+            regeln=["Trading-Plan 3.2", "Trading-Plan 3.3", "Trading-Plan 3.4"],
+            gesperrt_weil=gesperrt,
+        ))
+    return out
+
+
+def urteil_kern_etf(ctx: Kontext) -> Decision | None:
+    """Der monatliche Sparplan — der einzige Automatismus im ganzen System."""
+    plan = ctx.kern_plan
+    if plan is None or not plan.etf_symbol:
+        return None
+    rate = float(plan.monatsrate_eur or 0.0) * plan.etf_anteil
+    monat = ctx.as_of.strftime("%Y-%m")
+    if ctx.sparplan_offen and rate > 0:
+        return Decision(
+            schluessel="KERN:sparplan", art="kern_etf", topf="KERN",
+            verdikt=NACHKAUFEN, verdikt_label=VERDIKT_LABEL[NACHKAUFEN], dringlichkeit=DIESE_WOCHE,
+            isin=plan.etf_isin, symbol=plan.etf_symbol, name=plan.etf.get("name") or "Welt-ETF",
+            betrag_eur=rate,
+            begruendung=(f"Die Sparplan-Ausführung für {monat} fehlt noch: {zahl(rate, 0)} EUR in "
+                         f"{plan.etf_symbol}. Sobald sie in der App gelaufen ist, hier eintragen."),
+            hinweise=["Der Sparplan wird nie wegen der Marktlage pausiert (Trading-Plan 2)."],
+            belege=[Beleg("Ausführungstag", f"{plan.sparplan_tag}. des Monats", None, "KERN.md 5.1"),
+                    Beleg("Anteil des Kerns im ETF", prozent(plan.etf_anteil), None, "KERN.md 1")],
+            regeln=["Trading-Plan 2", "KERN.md 5"],
+            aktion=AktionSpec(
+                aktion="ledger.add", label="Ausführung eintragen",
+                felder=[_feld("betrag_eur", "Bezahlt (EUR)", "dezimal", round(rate, 2), True),
+                        _feld("stueck", "Anteile laut App", "dezimal", None, True),
+                        _feld("datum", "Datum", "datum", ctx.as_of.isoformat(), True)],
+                body={"typ": "sparplan", "topf": "kern_etf", "isin": plan.etf_isin,
+                      "symbol": plan.etf_symbol, "notiz": f"Sparplan {monat}"},
+                bestaetigung="Die Ausführung steht in der App.",
+            ),
+        )
+    werte = ctx.kern_werte
+    wert = getattr(werte, "kern_etf_eur", None) if werte else None
+    if not wert:
+        return None
+    return Decision(
+        schluessel="KERN:etf", art="kern_etf", topf="KERN",
+        verdikt=HALTEN, verdikt_label=VERDIKT_LABEL[HALTEN], dringlichkeit=INFO,
+        isin=plan.etf_isin, symbol=plan.etf_symbol, name=plan.etf.get("name") or "Welt-ETF",
+        wert_eur=wert,
+        begruendung=("Der Sparplan läuft. Der Kern wird nicht wegen der Marktlage angefasst — "
+                     "auch nicht bei roter Ampel."),
+        regeln=["Trading-Plan 2"],
+    )
+
+
+def urteil_kern_aktie(these: dict, wert_eur: float | None, faellig: bool, ctx: Kontext) -> Decision:
+    """Kern-Aktien werden gehalten. Verkauft wird nur bei Thesenbruch, nie wegen des Kurses."""
+    prov = (these.get("origin") or {}).get("raw_provenance") or {}
+    symbol = prov.get("symbol") or these.get("ticker") or ""
+    name = str(these.get("thesis_statement") or "").split(" (")[0] or symbol
+    review = ((these.get("monitoring") or {}).get("next_review_date") or "")[:10]
+    kill = these.get("kill_criteria") or []
+    belege = [Beleg("Halteabsicht", "mindestens drei Jahre, kein Stop", None, "Trading-Plan 3.1"),
+              Beleg("Nächster Review", review or "offen", None, "KERN.md 6")]
+    belege += [Beleg("Kill-Kriterium", k, None, "Trading-Plan 3.2") for k in kill[:4]]
+
+    if faellig:
+        return Decision(
+            schluessel=f"KERN:{these['thesis_id']}", art="kern_aktie", topf="KERN",
+            verdikt=PRUEFEN, verdikt_label=VERDIKT_LABEL[PRUEFEN], dringlichkeit=DIESE_WOCHE,
+            symbol=symbol, isin=prov.get("isin", ""), name=name, wert_eur=wert_eur,
+            begruendung=(f"Halbjahres-Review für {name} ist fällig. Geh die Kill-Kriterien durch — "
+                         f"nur ein Thesenbruch rechtfertigt einen Verkauf, kein Kursrückgang."),
+            belege=belege, regeln=["Trading-Plan 3.1", "KERN.md 6"],
+        )
+    return Decision(
+        schluessel=f"KERN:{these['thesis_id']}", art="kern_aktie", topf="KERN",
+        verdikt=HALTEN, verdikt_label=VERDIKT_LABEL[HALTEN], dringlichkeit=INFO,
+        symbol=symbol, isin=prov.get("isin", ""), name=name, wert_eur=wert_eur,
+        begruendung=(f"Kern-Aktie, Halteabsicht mindestens drei Jahre. Ein Kursrückgang ist kein "
+                     f"Verkaufsgrund." + (f" Nächster Review: {review}." if review else "")),
+        belege=belege, regeln=["Trading-Plan 3.1"],
+    )
+
+
+def urteil_rebalance(ctx: Kontext) -> Decision | None:
+    """Nur in der ersten Januarwoche und nur außerhalb des Bandes (Trading-Plan 1)."""
+    band = ctx.band or {}
+    if band.get("status") in (None, "ok", "unbekannt"):
+        return None
+    if ctx.as_of.month != 1 or ctx.as_of.day > 7:
+        return None
+    zu_wenig = band["status"] == "unter"
+    gesperrt = None
+    if zu_wenig and ctx.kill_aktiv:
+        gesperrt = "Bei aktivem Kill-Switch wird der Satellit nicht aufgefüllt (Trading-Plan 1)."
+    return Decision(
+        schluessel="KERN:rebalance", art="rebalance", topf="GESAMT",
+        verdikt=PRUEFEN, verdikt_label=VERDIKT_LABEL[PRUEFEN], dringlichkeit=DIESE_WOCHE,
+        name="Kern und Satellit ausgleichen",
+        begruendung=(f"Der Satellit liegt bei {prozent(band.get('anteil'))} und damit "
+                     + ("unter" if zu_wenig else "über")
+                     + f" dem Band von {prozent(band.get('low'))} bis {prozent(band.get('high'))}. "
+                     + ("Aus dem Kern auffüllen." if zu_wenig else "Den Überschuss in den Kern übertragen.")),
+        belege=[Beleg("Zielanteil", prozent(band.get("ziel")), None, "Trading-Plan 1")],
+        regeln=["Trading-Plan 1"], gesperrt_weil=gesperrt,
+    )
+
+
+def urteil_depotabgleich(ctx: Kontext) -> Decision | None:
+    """Die Gegenmaßnahme gegen vergessene Buchungen.
+
+    Jede Zahl im Dashboard hängt daran, dass das Kassenbuch vollständig ist. Ohne einen
+    regelmäßigen Abgleich mit der App fällt eine fehlende Zeile nie auf.
+    """
+    if not ctx.depot_abgleich_faellig or ctx.kern_werte is None:
+        return None
+    gesamt = getattr(ctx.kern_werte, "gesamt_eur", 0.0)
+    return Decision(
+        schluessel="KERN:abgleich", art="abgleich", topf="GESAMT",
+        verdikt=PRUEFEN, verdikt_label=VERDIKT_LABEL[PRUEFEN], dringlichkeit=DIESE_WOCHE,
+        name="Depotwert abgleichen", wert_eur=gesamt,
+        begruendung=(f"Das System rechnet mit {zahl(gesamt, 0)} EUR. Vergleich das mit der "
+                     f"Trade-Republic-App — weicht es ab, fehlt hier eine Buchung."),
+        hinweise=["Einmal im Monat genügt. Die Differenz wird als Korrektur gebucht."],
+        regeln=[],
+        aktion=AktionSpec(
+            aktion="depot.abgleich", label="Wert aus der App eintragen",
+            felder=[_feld("wert_eur", "Depotwert laut App (EUR)", "dezimal", None, True)],
+            body={}, bestaetigung="",
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- Zusammenbau
 def urteil_einrichtung(ctx: Kontext) -> Decision | None:
     """Ohne hinterlegtes Kapital rechnet das System keine Positionsgrößen.
@@ -451,6 +661,18 @@ def alle_urteile(positionen: list[PositionView], kandidaten: list[Proposal],
     """(Entscheidungen, Ablehnungen). Sortiert nach Dringlichkeit, innerhalb davon stabil."""
     out = [urteil_satellit_position(p, ctx) for p in positionen]
     out += [urteil_satellit_kandidat(p, ctx) for p in kandidaten]
+    # Kern zuerst in der Liste erzeugen — er ist der größere Teil des Depots und braucht
+    # weder Ampel noch Kapitalfreigabe.
+    if ctx.kern_plan is not None:
+        out += urteil_kern_startbetrag(ctx)
+        if etf := urteil_kern_etf(ctx):
+            out.append(etf)
+        for these, wert, faellig in ctx.kern_thesen:
+            out.append(urteil_kern_aktie(these, wert, faellig, ctx))
+        if reb := urteil_rebalance(ctx):
+            out.append(reb)
+        if abgleich := urteil_depotabgleich(ctx):
+            out.append(abgleich)
     if einrichtung := urteil_einrichtung(ctx):
         out.append(einrichtung)
     cash = urteil_cash(ctx)
