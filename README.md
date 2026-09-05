@@ -35,7 +35,7 @@ Das Journal (`state/theses/`) ist `trader-memory-core` aus [tradermonty/claude-t
 
 ```bash
 git clone <dieses Repo> satellit && cd satellit
-cp .env.example .env            # PUSHOVER_TOKEN, PUSHOVER_USER eintragen (STOOQ_APIKEY optional)
+cp .env.example .env            # Pushover-Keys, DASHBOARD_PASSWORD, SESSION_SALT, SATELLIT_API_TOKEN eintragen
 docker compose build
 docker compose run --rm satellit account set --equity 5000      # Satelliten-Kapital in EUR
 docker compose run --rm satellit account dry-run --until 2026-09-25   # Trockenlauf: 2 Wochenenden
@@ -47,6 +47,35 @@ docker compose logs -f
 
 Ohne Docker: `pip install -r requirements.txt` und `python3 -m satellit …` (Python ≥ 3.11).
 `scripts/smoke_live.sh` fasst die Erstprüfung zusammen.
+
+## Dashboard (Next.js)
+
+Zweiter Container im selben Compose-Stack (`dashboard/`): Next.js 15 (App Router), Tailwind, shadcn/ui-Komponenten, Recharts.
+Liest das `state/`-Volume **read-only** und schreibt ausschließlich über die Python-API (`satellit serve` startet sie auf Port 8787
+im Compose-Netz, Token `SATELLIT_API_TOKEN`).
+
+| Seite | Inhalt |
+|---|---|
+| `/` Übersicht | Letzter Lauf, Ampel USA/EU, Kapital/Drawdown, **Montag erledigen** (Positionen mit Stop-Nachzug/Verkauf), Kandidaten, Watchlist, Statistik, Datenqualität |
+| `/screener` | Alle Titel des letzten Laufs mit Kennzahlen und Flags, Filter nach Kandidat/Watchlist/Top-RS/Region, ältere Läufe wählbar |
+| `/journal`, `/journal/<id>` | Thesen mit Status, P&L, R-Multiple, Stop-Verlauf, Statusverlauf; Kennzahlen (Trefferquote, Expectancy, Profit-Faktor) |
+| `/ampel` | Verlauf der Ampel-Scores (US: Uptrend/Breadth, EU: P200/P50) mit Schwellen, Roh vs. Effektiv |
+| `/aktionen` | These anlegen (mit Positionsgröße), Ausführung eintragen, Stop nachziehen, Schließen, Kapital/Trockenlauf/Kill-Switch, Wochenlauf starten |
+
+Login per Passwort (`DASHBOARD_PASSWORD`), Session-Cookie 30 Tage. Der Port ist in `docker-compose.yml` auf `127.0.0.1:3000` gebunden —
+davor gehört ein Reverse-Proxy mit HTTPS (Caddy: `satellit.example.de { reverse_proxy 127.0.0.1:3000 }`). `DASHBOARD_URL` in `.env`
+landet als Link in der Push-Nachricht.
+
+```bash
+openssl rand -hex 32          # -> SATELLIT_API_TOKEN
+openssl rand -hex 16          # -> SESSION_SALT
+docker compose build dashboard && docker compose up -d
+```
+
+**Hinweis zum Build:** Das Dashboard wurde ohne npm-Zugang geschrieben; Syntax ist geprüft, der erste `npm run build` läuft auf
+deinem Server. `next.config.mjs` hat `typescript.ignoreBuildErrors` an, damit ein Typ-Nit den Container-Build nicht stoppt —
+`cd dashboard && npm install && npm run typecheck` zeigt, ob es welche gibt. Es gibt kein `package-lock.json`; der erste Build
+erzeugt eines, das du einchecken solltest. Weitere shadcn-Komponenten: `npx shadcn@latest add dialog` (components.json liegt bei).
 
 ### Was beim ersten Lauf zu prüfen ist
 
@@ -78,7 +107,8 @@ Ohne Docker: `pip install -r requirements.txt` und `python3 -m satellit …` (Py
 | `journal close <id> --price P --reason stop\|trend\|manual` | Exit eintragen (manual = Regelbruch) |
 | `journal list [--status]`, `review-due`, `summary`, `postmortem <id>`, `monthly --month YYYY-MM` | Reviews |
 | `push-test` | Pushover prüfen |
-| `serve` | Scheduler-Schleife (Standard im Container) |
+| `serve [--no-api]` | Scheduler-Schleife + Dashboard-API (Standard im Container) |
+| `api [--port 8787]` | nur die Dashboard-API |
 
 ## Konfiguration
 
@@ -86,7 +116,7 @@ Ohne Docker: `pip install -r requirements.txt` und `python3 -m satellit …` (Py
   Eintrag in `docs/CHANGELOG_REGELN.md`.
 - `config/exclusions.yaml` — Kern-Aktien (kein Doppelhalten) und bei TR nicht handelbare Titel.
 - `config/symbol_overrides.yaml` — Korrekturen der Ticker-Zuordnung (ISIN → Yahoo-Symbol).
-- `.env` — Pushover-Schlüssel, optional Stooq-API-Key.
+- `.env` — Pushover-Schlüssel, Dashboard-Passwort, Session-Salt, API-Token, optional Stooq-API-Key und `DASHBOARD_URL`.
 
 ## Datenquellen und bekannte Grenzen
 

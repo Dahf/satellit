@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from . import journal, regime
+from .api import run_weekly_job, serve_api, write_run_status
 from .config import Settings, load_settings
 from .data import build_source, update_prices
 from .fx import FxTable, load_fx
@@ -37,14 +38,24 @@ def _setup_logging(settings: Settings, verbose: bool) -> None:
 def cmd_weekly(a, s: Settings) -> int:
     as_of = date.fromisoformat(a.as_of) if a.as_of else None
     source = build_source(s, a.source) if a.source else None
-    res = run_weekly(s, as_of=as_of, source=source, demo=a.demo, skip_us_scripts=a.skip_us_scripts)
-    path = write_report(res, s)
+    write_run_status(s, running=True, started=datetime.now().isoformat(timespec="seconds"), error=None)
+    try:
+        res = run_weekly(s, as_of=as_of, source=source, demo=a.demo, skip_us_scripts=a.skip_us_scripts)
+        path = write_report(res, s)
+    except Exception as exc:  # noqa: BLE001
+        write_run_status(s, running=False, ok=False, error=str(exc), finished=datetime.now().isoformat(timespec="seconds"))
+        raise
     title, msg = build_push(res, s)
     print(Path(path).read_text(encoding="utf-8"))
     print(f"\n--- Bericht gespeichert: {path}", file=sys.stderr)
+    pushed = False
     if not a.no_push:
-        ok = send_pushover(title, msg, priority=1 if (res.kill_active or any(p.soft_exit or p.hard_stop_hit for p in res.positions)) else 0)
-        print(f"--- Pushover: {'gesendet' if ok else 'nicht gesendet'}", file=sys.stderr)
+        pushed = send_pushover(title, msg, priority=1 if (res.kill_active or any(p.soft_exit or p.hard_stop_hit for p in res.positions)) else 0,
+                               url=os.environ.get("DASHBOARD_URL") or None)
+        print(f"--- Pushover: {'gesendet' if pushed else 'nicht gesendet'}", file=sys.stderr)
+    write_run_status(s, running=False, ok=True, finished=datetime.now().isoformat(timespec="seconds"),
+                     as_of=res.as_of.isoformat(), report=path, pushed=pushed, candidates=len(res.proposals),
+                     failed_symbols=len(res.data_failed), demo=a.demo)
     return 0
 
 
@@ -199,10 +210,17 @@ def cmd_push_test(a, s: Settings) -> int:
     return 0 if ok else 1
 
 
+def cmd_api(a, s: Settings) -> int:
+    serve_api(s, port=int(os.environ.get("SATELLIT_API_PORT", a.port)), block=True)
+    return 0
+
+
 def cmd_serve(a, s: Settings) -> int:
-    """Einfacher Scheduler: wartet bis zum nächsten Termin (Samstag 08:00 Europe/Berlin) und läuft dann."""
+    """Scheduler: wartet bis zum nächsten Termin (Samstag 08:00 Europe/Berlin) und läuft dann. Startet die API mit."""
     tz = ZoneInfo(os.environ.get("SATELLIT_TZ") or s.get("schedule.timezone", "Europe/Berlin"))
     weekday, hour, minute = int(s.get("schedule.weekday", 5)), int(s.get("schedule.hour", 8)), int(s.get("schedule.minute", 0))
+    if not a.no_api:
+        serve_api(s, port=int(os.environ.get("SATELLIT_API_PORT", 8787)), block=False)
     while True:
         now = datetime.now(tz)
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -214,12 +232,8 @@ def cmd_serve(a, s: Settings) -> int:
         log.info("Nächster Lauf: %s (in %.1f h)", target.isoformat(), wait / 3600)
         time.sleep(max(60, min(wait, 3600)))
         if datetime.now(tz) >= target:
-            try:
-                ns = argparse.Namespace(as_of=None, source=None, demo=False, skip_us_scripts=False, no_push=False)
-                cmd_weekly(ns, s)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("Wochenlauf fehlgeschlagen")
-                send_pushover("Satellit: Wochenlauf FEHLGESCHLAGEN", f"{exc}"[:900], priority=1)
+            result = run_weekly_job(s, push=True)
+            log.info("Wochenlauf: %s", result)
             time.sleep(120)
 
 
@@ -279,7 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
     j.set_defaults(func=cmd_journal)
 
     sub.add_parser("push-test").set_defaults(func=cmd_push_test)
-    sub.add_parser("serve", help="Scheduler-Schleife (Docker)").set_defaults(func=cmd_serve)
+    sv = sub.add_parser("serve", help="Scheduler-Schleife + Dashboard-API (Docker)")
+    sv.add_argument("--no-api", action="store_true")
+    sv.set_defaults(func=cmd_serve)
+    ap = sub.add_parser("api", help="nur die Dashboard-API starten")
+    ap.add_argument("--port", type=int, default=8787)
+    ap.set_defaults(func=cmd_api)
     return p
 
 

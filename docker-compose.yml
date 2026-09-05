@@ -10,4 +10,22 @@ services:
     volumes:
       - ./state:/app/state      # Journal, Kurs-Cache, Berichte, Ampel-Historie
       - ./config:/app/config    # settings.yaml, exclusions.yaml, symbol_overrides.yaml
-    command: ["serve"]          # Scheduler: Samstag 08:00 Europe/Berlin
+    expose:
+      - "8787"                  # Dashboard-API, nur im Compose-Netz
+    command: ["serve"]          # Scheduler (Samstag 08:00) + API
+
+  dashboard:
+    build: ./dashboard
+    image: satellit-dashboard:latest
+    container_name: satellit-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+      - SATELLIT_API_URL=http://satellit:8787
+    volumes:
+      - ./state:/data:ro        # Dashboard liest nur; schreiben geht über die API
+    ports:
+      - "127.0.0.1:3000:3000"   # nur lokal — davor ein Reverse-Proxy mit HTTPS (Caddy/nginx/Traefik)
+    depends_on:
+      - satellit
