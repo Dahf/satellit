@@ -5,6 +5,10 @@
 # Schlüssel darf ISIN, das abgeleitete Yahoo-Symbol oder der rohe Ticker sein. Da die
 # iShares-Dateien seit 09/2026 keine ISIN-Spalte mehr enthalten, ist das Symbol der
 # verlässliche Schlüssel.
-overrides: {}
-#  "BP.L": "BP.L"
-#  "ERIC-B.ST": "ERIC-B.ST"
+overrides:
+  # Die deutsche iShares-Datei schreibt Gattungsaktien ohne Trennzeichen ("BRKB" statt
+  # "BRK B"), Yahoo erwartet einen Bindestrich. Geprüft 09/2026.
+  "BRKB": "BRK-B"        # Berkshire Hathaway Class B
+  "BFB": "BF-B"          # Brown-Forman Class B
+  # Bei iShares in EUR geführt, gehandelt wird der Titel aber in Stockholm.
+  "VSURE.HE": "VSURE.ST"

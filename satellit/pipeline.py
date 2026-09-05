@@ -11,10 +11,12 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from . import decisions as dec
 from . import indicators as ind
 from . import journal, regime
 from .config import Settings
-from .data import PriceSource, SyntheticSource, build_source, update_prices
+from .decisions import Decision, Kontext, SkipInfo
+from .data import NullSource, PriceSource, SyntheticSource, build_source, update_prices
 from .fx import FxTable, load_fx
 from .screener import ScreenerContext, run_screener
 from .universe import Constituent, load_universe, snapshot_aktualisieren
@@ -43,6 +45,11 @@ class PositionView:
     pnl_pct: float | None
     open_risk_eur: float
     note: str = ""
+    # EUR-Sicht: bis hierher gab es je Position nur Lokalwährungskurse, also keine Antwort
+    # auf "wie viel ist das in Euro" und "wie viel habe ich damit verdient".
+    wert_eur: float | None = None
+    einstand_eur: float | None = None
+    gewinn_eur: float | None = None
 
 
 @dataclass
@@ -77,7 +84,7 @@ class WeeklyResult:
     risk_pct_by_region: dict[str, float]
     table: pd.DataFrame
     proposals: list[Proposal]
-    skipped: list[str]
+    skipped: list[SkipInfo]
     positions: list[PositionView]
     open_risk_pct: float | None
     universe_size: dict[str, int]
@@ -87,6 +94,10 @@ class WeeklyResult:
     data_notes: list[str]
     fx_note: str
     regime_notes: list[str]
+    # Ergebnis des Entscheidungsmodells — die einzige Quelle für "was ist zu tun".
+    entscheidungen: list[Decision] = field(default_factory=list)
+    abgelehnt: list[Decision] = field(default_factory=list)
+    fx_kurse: dict[str, float] = field(default_factory=dict)
     digest_md: str | None = None
     report_path: str | None = None
     demo: bool = False
@@ -159,16 +170,46 @@ def review_positions(settings: Settings, frames: dict[str, pd.DataFrame], fx: Fx
         view.hard_stop_hit = bool(week_low is not None and stop > 0 and week_low <= stop)
         view.pnl_pct = (close / entry - 1.0) if entry else None
         view.open_risk_eur = risk_eur
+        view.wert_eur = fx.to_eur(close * shares, currency)
+        view.einstand_eur = fx.to_eur(entry * shares, currency) if entry else None
+        view.gewinn_eur = (view.wert_eur - view.einstand_eur) if view.einstand_eur is not None else None
         out.append(view)
     return out
+
+
+def _wochenpunkte(df: pd.DataFrame, soft_weeks: int, anzahl: int = 60) -> list[dict]:
+    """Wochenschlüsse + gleitender Schnitt für den Mini-Chart in der Begründung.
+
+    Der Chart zeigt genau die Regel, nach der verkauft wird: Kurs gegen SMA10W.
+    """
+    weekly = ind.weekly_closes(df)
+    if weekly.empty:
+        return []
+    sma = weekly.rolling(soft_weeks).mean()
+    punkte = []
+    for stichtag, kurs in list(weekly.items())[-anzahl:]:
+        s = sma.get(stichtag)
+        punkte.append({
+            "d": stichtag.date().isoformat() if hasattr(stichtag, "date") else str(stichtag)[:10],
+            "kurs": round(float(kurs), 4),
+            "sma10w": round(float(s), 4) if s is not None and np.isfinite(s) else None,
+        })
+    return punkte
 
 
 # ---------------------------------------------------------------------- selection
 def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, regime.RegimeReading],
                    positions: list[PositionView], account: journal.Account, fx: FxTable,
-                   risk_pct_by_region: dict[str, float], blocked: bool) -> tuple[list[Proposal], list[str]]:
+                   risk_pct_by_region: dict[str, float], blocked: bool) -> tuple[list[Proposal], list[SkipInfo]]:
+    """Kandidaten in Vorschläge übersetzen.
+
+    Ablehnungen kommen als strukturierte SkipInfo zurück, nicht als fertige Sätze — die
+    Formulierung entsteht in decisions.py. Vorher wurden die Sätze hier gebaut und beim
+    Schreiben des Berichts wieder weggeworfen, sodass der Nutzer nie erfuhr, warum nichts
+    vorgeschlagen wurde.
+    """
     proposals: list[Proposal] = []
-    skipped: list[str] = []
+    skipped: list[SkipInfo] = []
     if table.empty:
         return proposals, skipped
     cands = table[table["candidate"]].sort_values("rs_score", ascending=False)
@@ -176,10 +217,10 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
         return proposals, skipped
     equity = account.satellite_equity_eur
     if not equity:
-        skipped.append("Kein Satelliten-Kapital hinterlegt (`satellit account set --equity ...`) — keine Positionsgrößen")
+        skipped.append(SkipInfo(symbol="", code="KEIN_KAPITAL"))
         return proposals, skipped
     if blocked:
-        skipped.append("Keine neuen Einstiege (Kill-Switch aktiv)")
+        skipped.append(SkipInfo(symbol="", code="KILL_SWITCH"))
         return proposals, skipped
 
     max_positions = int(settings.get("risk.max_positions", 5))
@@ -196,35 +237,43 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
     held = {p.symbol for p in positions}
     per_region_left = {r: int(limits.get(rd.effective or "RED", 0)) for r, rd in readings.items()}
 
+    def _skip(r, code: str, **params) -> SkipInfo:
+        return SkipInfo(symbol=r["symbol"], name=r["name"], region=r["region"], sektor=r["sector"],
+                        code=code, params=params,
+                        rs_rank_pct=float(r["rs_rank_pct"]) if pd.notna(r["rs_rank_pct"]) else None)
+
     for _, r in cands.iterrows():
         region = r["region"]
         state = readings[region].effective if region in readings else None
         if r["symbol"] in held:
+            # Lief bisher wortlos ins Leere — der Nutzer sah nie, dass der Titel schon liegt.
+            skipped.append(_skip(r, "BEREITS_GEHALTEN"))
             continue
         if per_region_left.get(region, 0) <= 0:
-            skipped.append(f"{r['symbol']}: Ampel {region} = {regime.LABEL.get(state)} — Limit neue Einstiege erreicht")
+            skipped.append(_skip(r, "AMPEL_LIMIT", ampel=state, ampel_label=regime.LABEL.get(state, "UNBEKANNT"),
+                                 limit=int(limits.get(state or "RED", 0))))
             continue
         if n_open + len(proposals) >= max_positions:
-            skipped.append(f"{r['symbol']}: max. {max_positions} Positionen erreicht")
+            skipped.append(_skip(r, "MAX_POSITIONEN", max=max_positions))
             continue
         if sector_count.get(r["sector"], 0) >= max_sector:
-            skipped.append(f"{r['symbol']}: Sektor {r['sector']} bereits {max_sector}x belegt")
+            skipped.append(_skip(r, "MAX_SEKTOR", max=max_sector))
             continue
         risk_pct = risk_pct_by_region.get(region, float(settings.get("risk.risk_pct", 1.0)))
         risk_eur = equity * risk_pct / 100.0
         stop_dist_eur = fx.to_eur(float(r["close"] - r["initial_stop"]), r["currency"])
         if not (stop_dist_eur > 0):
-            skipped.append(f"{r['symbol']}: ungültiger Stopabstand")
+            skipped.append(_skip(r, "STOP_UNGUELTIG"))
             continue
         shares = math.floor(risk_eur / stop_dist_eur)
         price_eur = fx.to_eur(float(r["close"]), r["currency"])
         shares = min(shares, math.floor(max_value / price_eur)) if price_eur > 0 else 0
         if shares < 1:
-            skipped.append(f"{r['symbol']}: Positionsgröße < 1 Stück (Stückpreis {price_eur:.0f} EUR)")
+            skipped.append(_skip(r, "ZU_TEUER", preis_eur=price_eur))
             continue
         new_risk = shares * stop_dist_eur
         if open_risk + new_risk > max_open_risk:
-            skipped.append(f"{r['symbol']}: offenes Gesamtrisiko würde {max_open_risk:.0f} EUR überschreiten")
+            skipped.append(_skip(r, "GESAMTRISIKO", grenze_eur=max_open_risk))
             continue
         proposals.append(Proposal(
             symbol=r["symbol"], isin=r["isin"], name=r["name"], region=region, currency=r["currency"],
@@ -243,7 +292,17 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
 def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSource | None = None,
                fallback: PriceSource | None = None, demo: bool = False, skip_us_scripts: bool = False,
                us_scores: tuple[float | None, float | None] | None = None,
-               progress: Callable[[int, int], None] | None = None) -> WeeklyResult:
+               progress: Callable[[int, int], None] | None = None,
+               offline: bool = False) -> WeeklyResult:
+    """Wochenlauf. `offline=True` rechnet nur aus dem Kurs-Cache, ohne Netz und ohne
+    Unterprozesse — dafür in Sekunden statt Minuten (siehe view.neu_rechnen)."""
+    if offline:
+        # Wirklich kein Netz: keine Kursquelle, kein Fallback (der würde sonst für jedes
+        # gescheiterte Symbol einzeln anfragen — bei 1.100 Titeln minutenlang), keine
+        # Unterprozesse und kein Konstituenten-Download.
+        source = source or NullSource()
+        fallback = None
+        skip_us_scripts = True
     settings.ensure_dirs()
     today = date.today()
     as_of = as_of or last_friday(today)
@@ -255,14 +314,17 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
         uni_status = {c.region: {"quelle": "demo", "alter_tage": 0, "anzahl": 0, "ok": True} for c in cons}
         source = source or SyntheticSource(days=int(settings.get("data.history_days", 420)))
     else:
-        cons, uni_warn, uni_status = load_universe(settings)
+        cons, uni_warn, uni_status = load_universe(settings, offline=offline)
         source = source or build_source(settings)
-        if fallback is None and settings.get("data.fallback") and settings.get("data.fallback") != settings.get("data.primary"):
+        if (not offline and fallback is None and settings.get("data.fallback")
+                and settings.get("data.fallback") != settings.get("data.primary")):
             try:
                 fallback = build_source(settings, settings.get("data.fallback"))
             except ValueError:
                 fallback = None
-    if not demo:
+    if not demo and not offline:
+        # Im Offline-Modus nicht schreiben: die Daten kämen aus dem Cache, und das
+        # Neuschreiben würde nur das Alter des Snapshots zurücksetzen.
         snapshot_aktualisieren(cons, uni_status, settings.universe_dir / "universe_snapshot.csv")
     universe_size = {}
     for c in cons:
@@ -347,14 +409,68 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
     # 7. Auswahl
     proposals, skipped = select_entries(settings, table, readings, positions, account, fx, risk_by_region, blocked)
 
-    # 8. Digest
-    digest_md = journal.run_weekly_digest(settings, as_of)
+    # 8. Digest — ein Unterprozess, im Offline-Modus übersprungen
+    digest_md = None if offline else journal.run_weekly_digest(settings, as_of)
+
+    # 9. Entscheidungen — hier und nur hier wird geurteilt.
+    d_ctx = _entscheidungs_kontext(settings, as_of, readings, risk_by_region, account, blocked, dry_run,
+                                   frames, positions, proposals)
+    entscheidungen, abgelehnt = dec.alle_urteile(positions, proposals, skipped, d_ctx)
 
     return WeeklyResult(
         as_of=as_of, readings=readings, account=account, kill_active=blocked, kill_reason=account.kill_switch_reason,
         dry_run=dry_run, risk_pct_by_region=risk_by_region, table=table, proposals=proposals, skipped=skipped,
         positions=positions, open_risk_pct=open_risk_pct, universe_size=universe_size, universe_warnings=uni_warn,
         universum_status=uni_status,
-        data_failed=failed, data_notes=notes, fx_note=fx.note, regime_notes=regime_notes, digest_md=digest_md,
+        data_failed=failed, data_notes=notes, fx_note=fx.note, regime_notes=regime_notes,
+        entscheidungen=entscheidungen, abgelehnt=abgelehnt, fx_kurse=dict(fx.rates), digest_md=digest_md,
         demo=demo,
+    )
+
+
+def _entscheidungs_kontext(settings: Settings, as_of: date, readings: dict[str, regime.RegimeReading],
+                           risk_by_region: dict[str, float], account: journal.Account,
+                           blocked: bool, dry_run: bool, frames: dict[str, pd.DataFrame],
+                           positions: list[PositionView], proposals: list[Proposal]) -> Kontext:
+    """Rohwerte für das Entscheidungsmodell einsammeln — ohne Pipeline-Typen weiterzureichen."""
+    limits = settings.get("signal.max_new_entries", {"GREEN": 2, "YELLOW": 1, "RED": 0})
+    soft_weeks = int(settings.get("risk.soft_exit_weeks", 10))
+    detail, ampel_note = {}, {}
+    for r, rd in readings.items():
+        if r == "US":
+            detail[r] = f"Uptrend {dec.zahl(rd.uptrend, 0)} · Breadth {dec.zahl(rd.breadth, 0)}"
+        else:
+            detail[r] = f"P200 {dec.prozent(rd.p200, 0)} · P50 {dec.prozent(rd.p50, 0)}"
+        # Gute Rohwerte bei roter Ampel sehen wie ein Fehler aus. Es ist die Hysterese:
+        # die Ampel schaltet erst nach mehreren Lesungen in Folge um.
+        if rd.raw != rd.effective:
+            wochen = int(settings.get(f"regime.{r.lower()}.hysteresis_weeks", 2))
+            ampel_note[r] = (f"Die Rohwerte stehen bereits auf {regime.LABEL.get(rd.raw)}, die Ampel schaltet aber "
+                             f"erst nach {wochen} Wochen in Folge um — damit nicht auf jede Zuckung reagiert wird.")
+
+    # Chartpunkte nur für Zeilen, die auch angezeigt werden — sonst bläht der Payload auf.
+    wochenkurse = {}
+    for symbol in {p.symbol for p in positions} | {p.symbol for p in proposals}:
+        df = frames.get(symbol)
+        if df is not None and not df.empty:
+            wochenkurse[symbol] = _wochenpunkte(df, soft_weeks)
+
+    gebunden = sum(p.wert_eur or 0.0 for p in positions)
+    equity = account.satellite_equity_eur
+    return Kontext(
+        as_of=as_of,
+        ampel={r: rd.effective for r, rd in readings.items()},
+        ampel_label={r: rd.label for r, rd in readings.items()},
+        ampel_detail=detail,
+        ampel_note=ampel_note,
+        risk_pct=dict(risk_by_region),
+        max_neue_einstiege={r: int(limits.get(rd.effective or "RED", 0)) for r, rd in readings.items()},
+        wochenkurse=wochenkurse,
+        equity_eur=equity,
+        cash_eur=max(0.0, equity - gebunden) if equity else None,
+        kill_aktiv=blocked, kill_grund=account.kill_switch_reason,
+        trockenlauf_bis=account.dry_run_until if dry_run else None,
+        soft_exit_wochen=soft_weeks,
+        max_positionen=int(settings.get("risk.max_positions", 5)),
+        startphase=len(journal.closed_theses(settings)) < int(settings.get("risk.start_trades", 20)),
     )

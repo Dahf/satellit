@@ -218,6 +218,25 @@ class StooqSource(PriceSource):
         return res
 
 
+class NullSource(PriceSource):
+    """Holt nichts. Für den netzfreien Neuaufbau der Ansicht nach einer Dashboard-Aktion.
+
+    update_prices liefert dann genau das, was im Cache liegt; Symbole ohne Cache landen
+    in `failed` und werden im Bericht als fehlende Kurse ausgewiesen — richtig so, denn
+    ohne Netz sind sie tatsächlich unbekannt.
+    """
+
+    name = "cache"
+
+    def fetch(self, symbols: list[str], start: date, end: date | None = None) -> FetchResult:
+        res = FetchResult()
+        if symbols:
+            res.notes.append(f"Nur Kurs-Cache verwendet ({len(symbols)} Symbole nicht nachgeladen)")
+        for s in symbols:
+            res.failed[s] = "kein Cache-Eintrag (offline)"
+        return res
+
+
 class FixtureSource(PriceSource):
     """Liest CSV-Dateien <dir>/<symbol>.csv — für Tests und Trockenläufe ohne Netz."""
 

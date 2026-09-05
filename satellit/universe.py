@@ -323,11 +323,15 @@ def import_holdings(settings: Settings, region: str, text: str) -> tuple[int, Pa
     return len(cons), ziel
 
 
-def load_universe(settings: Settings, force: bool = False) -> tuple[list[Constituent], list[str], dict[str, dict]]:
+def load_universe(settings: Settings, force: bool = False,
+                  offline: bool = False) -> tuple[list[Constituent], list[str], dict[str, dict]]:
     """Konstituenten aller Regionen laden.
 
     Reihenfolge je Region: frischer Cache -> Quellen der Reihe nach -> alter Cache
     -> local_file -> Snapshot des letzten erfolgreichen Laufs.
+
+    `offline=True` überspringt den Download-Schritt vollständig — für den Neuaufbau der
+    Ansicht nach einer Dashboard-Aktion, der in Sekunden fertig sein muss.
 
     Gibt (Konstituenten, Warnungen, Status je Region) zurück. Der Status hält fest, woher
     die Daten kamen und wie alt sie sind — ohne ihn bleibt ein Ausfall unsichtbar und die
@@ -365,7 +369,7 @@ def load_universe(settings: Settings, force: bool = False) -> tuple[list[Constit
         if fresh and not force:
             text, quelle, alter = cache_file.read_text(encoding="utf-8"), "cache", _alter_tage(cache_file)
         else:
-            for q in _quellen(cfg):
+            for q in ([] if offline else _quellen(cfg)):
                 try:
                     kandidat = _download(q["url"], q.get("referer"))
                     parse_ishares_csv(kandidat, region)      # validieren, bevor der Cache überschrieben wird

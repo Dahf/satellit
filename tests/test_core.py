@@ -22,7 +22,7 @@ from satellit import journal, regime  # noqa: E402
 from satellit.config import Settings, load_settings  # noqa: E402
 from satellit.data import StooqSource, SyntheticSource, _clean  # noqa: E402
 from satellit.fx import FxTable  # noqa: E402
-from satellit.pipeline import Proposal, select_entries  # noqa: E402
+from satellit.pipeline import Proposal, run_weekly, select_entries  # noqa: E402
 from satellit.screener import ScreenerContext, run_screener  # noqa: E402
 from satellit.universe import (  # noqa: E402
     Constituent, _download, apply_overrides, import_holdings, load_universe, parse_ishares_csv,
@@ -200,7 +200,8 @@ class TestSelection(unittest.TestCase):
         props, skipped = select_entries(settings, table, readings, [], acc, FxTable({}, "t"),
                                         {"US": 1.0, "EU": 1.0}, blocked=False)
         self.assertEqual([p.symbol for p in props], ["S0", "S1"])          # max 2 je Woche (GRÜN), EU rot
-        self.assertTrue(any("Sektor" in s for s in skipped) or any("Limit" in s for s in skipped))
+        codes = {s.code for s in skipped}
+        self.assertTrue({"MAX_SEKTOR", "AMPEL_LIMIT"} & codes, codes)
         for p in props:
             self.assertLessEqual(p.value_eur, 2500)                           # 25 % Deckel
             self.assertLessEqual(p.risk_eur, 100 + 1e-6)                      # 1 % Risiko
@@ -214,7 +215,7 @@ class TestSelection(unittest.TestCase):
         acc = journal.Account(satellite_equity_eur=10_000, high_water_mark=10_000)
         props, skipped = select_entries(settings, table, readings, [], acc, FxTable({}, "t"), {"US": 1.0}, blocked=True)
         self.assertEqual(props, [])
-        self.assertIn("Kill-Switch", skipped[0])
+        self.assertEqual(skipped[0].code, "KILL_SWITCH")
 
 
 class TestJournalMath(unittest.TestCase):
@@ -300,6 +301,39 @@ class TestUniversumQuellen(unittest.TestCase):
         with self.assertRaises(ValueError):
             import_holdings(self.settings, "EU", "irgendwas,ohne,tabellenkopf")
 
+    def test_ausschluss_per_symbol_greift(self):
+        """Trägt die Regel 'kein Doppelhalten' (Trading-Plan 3.5) — die Dateien haben keine ISIN mehr."""
+        (Path(self.tmp.name) / "config").mkdir(exist_ok=True)
+        (Path(self.tmp.name) / "config" / "exclusions.yaml").write_text(
+            "core_holdings:\n  - symbol: SAP.DE\n    note: Kern\nnot_tradable: []\nmanual: []\n",
+            encoding="utf-8")
+        save_universe_snapshot(parse_ishares_csv(GERMAN_CSV, "EU"), self.snapshot)
+        with mock.patch("satellit.universe._download", side_effect=RuntimeError("offline")):
+            cons, warnungen, _status = load_universe(self.settings)
+        self.assertNotIn("SAP.DE", {c.symbol for c in cons})
+        self.assertEqual(len(cons), 3)
+        self.assertFalse([w for w in warnungen if "ISIN-Spalte" in w])   # hier gibt es ISINs
+
+    def test_warnt_wenn_isin_ausschluesse_nicht_greifen_koennen(self):
+        """Ohne diese Warnung fällt ein wirkungsloser Ausschluss niemandem auf."""
+        (Path(self.tmp.name) / "config").mkdir(exist_ok=True)
+        (Path(self.tmp.name) / "config" / "exclusions.yaml").write_text(
+            "core_holdings:\n  - isin: DE0007164600\n    note: Kern\nnot_tradable: []\nmanual: []\n",
+            encoding="utf-8")
+        ohne_isin = GERMAN_CSV.replace(",ISIN,", ",KeineIsin,")
+        save_universe_snapshot(parse_ishares_csv(ohne_isin, "EU"), self.snapshot)
+        with mock.patch("satellit.universe._download", side_effect=RuntimeError("offline")):
+            _cons, warnungen, _status = load_universe(self.settings)
+        self.assertTrue([w for w in warnungen if "ISIN-Spalte" in w], warnungen)
+
+    def test_offline_laedt_nichts_herunter(self):
+        """view.neu_rechnen läuft nach jedem Dashboard-Klick — es darf kein Netz anfassen."""
+        save_universe_snapshot(parse_ishares_csv(GERMAN_CSV, "EU"), self.snapshot)
+        with mock.patch("satellit.universe._download", side_effect=AssertionError("Download im Offline-Modus")):
+            cons, _warnungen, status = load_universe(self.settings, offline=True)
+        self.assertTrue(cons)
+        self.assertEqual(status["EU"]["quelle"], "snapshot")
+
     def test_download_nennt_den_grund(self):
         antwort = mock.Mock(status_code=403, headers={"Content-Type": "text/html"}, text="<html>denied</html>")
         with mock.patch("satellit.universe.requests.Session") as Session, \
@@ -350,6 +384,36 @@ class TestIsharesEchtformat(unittest.TestCase):
     def test_ausschluss_und_override_greifen_ueber_das_symbol(self):
         cons = parse_ishares_csv(self.US_CSV, "US")
         self.assertEqual(apply_overrides(list(cons), {"BRK-B": "BRK-B.US"})[1].symbol, "BRK-B.US")
+
+
+class TestOfflineLauf(unittest.TestCase):
+    """Der Offline-Modus trägt den Neuaufbau der Ansicht nach jeder Aktion.
+
+    Vergisst er die Ersatzquelle abzuschalten, fragt jeder Klick sie für ~1.100 Symbole
+    einzeln ab — gemessen 2 Minuten statt 0,4 Sekunden.
+    """
+
+    class _Stop(Exception):
+        pass
+
+    def setUp(self):
+        self.settings = load_settings(ROOT / "config" / "settings.yaml")
+
+    def _quellen_bau_zaehlen(self, offline: bool) -> list:
+        gebaut = []
+        with mock.patch("satellit.pipeline.load_universe", return_value=([], [], {})), \
+             mock.patch("satellit.pipeline.build_source",
+                        side_effect=lambda *a, **k: (gebaut.append(a[1:] or ("primaer",)), object())[1]), \
+             mock.patch("satellit.pipeline.update_prices", side_effect=self._Stop):
+            with self.assertRaises(self._Stop):
+                run_weekly(self.settings, offline=offline)
+        return gebaut
+
+    def test_offline_baut_keine_kursquelle(self):
+        self.assertEqual(self._quellen_bau_zaehlen(offline=True), [])
+
+    def test_normaler_lauf_baut_primaer_und_ersatz(self):
+        self.assertEqual(len(self._quellen_bau_zaehlen(offline=False)), 2)
 
 
 class TestStooqOhneKey(unittest.TestCase):

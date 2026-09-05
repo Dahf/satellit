@@ -9,22 +9,18 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from . import decisions as dec
 from . import regime
 from .config import Settings
 from .pipeline import WeeklyResult
 
+# Eine Quelle für die Zahlenformatierung — decisions.py formuliert dieselben Werte für die
+# Oberfläche, und zwei Formatierer driften erfahrungsgemäß auseinander.
+_f = dec.zahl
+_pct = dec.prozent
 
-def _f(x, digits: int = 2, suffix: str = "") -> str:
-    try:
-        if x is None or (isinstance(x, float) and not np.isfinite(x)):
-            return "–"
-        return f"{float(x):,.{digits}f}{suffix}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except (TypeError, ValueError):
-        return "–"
-
-
-def _pct(x, digits: int = 1) -> str:
-    return "–" if x is None or (isinstance(x, float) and not np.isfinite(x)) else _f(float(x) * 100, digits, " %")
+_ZEICHEN = {dec.KAUFEN: "🟢", dec.VERKAUFEN: "🔻", dec.STOP_ANHEBEN: "⬆️", dec.PRUEFEN: "⚠️",
+            dec.HALTEN: "·", dec.WARTEN: "⏸", dec.NICHT_KAUFEN: "–", dec.NACHKAUFEN: "➕"}
 
 
 def ampel_line(r: regime.RegimeReading) -> str:
@@ -71,24 +67,19 @@ def build_markdown(res: WeeklyResult, settings: Settings) -> str:
         L.append("- ⚠️ Kein Kapital hinterlegt: `satellit account set --equity <EUR>` — ohne Kapital keine Positionsgrößen.")
     L.append("")
 
-    # Positionen
+    # Positionen — Urteil und Begründung kommen aus decisions.py, hier wird nur gerendert.
     L.append("## 3. Offene Positionen — Montag erledigen")
     if not res.positions:
         L.append("- keine")
     else:
-        L.append("| Symbol | Stücke | Einstieg | Kurs | P&L | Stop alt | Stop neu | Aktion |")
-        L.append("|---|---|---|---|---|---|---|---|")
+        urteil = {d.schluessel: d for d in res.entscheidungen}
+        L.append("| Symbol | Stücke | Einstieg | Kurs | P&L | Wert EUR | Stop alt | Stop neu | Aktion |")
+        L.append("|---|---|---|---|---|---|---|---|---|")
         for p in res.positions:
-            actions = []
-            if p.hard_stop_hit:
-                actions.append("⚠️ Wochentief ≤ Stop — im Depot prüfen, ob Stop ausgelöst wurde; falls ja `journal close --reason stop`")
-            if p.soft_exit:
-                actions.append("🔻 **VERKAUFEN** (Wochenschluss < SMA10W) — Market-Order Montag, dann `journal close --reason trend`")
-            if p.stop_raised and not p.soft_exit:
-                actions.append(f"⬆️ Stop-Order auf **{_f(p.new_stop)}** anheben, dann `journal stop {p.thesis_id} --stop {p.new_stop:.2f}`")
-            if not actions:
-                actions.append("halten" if not p.note else p.note)
-            L.append(f"| {p.symbol} | {_f(p.shares, 0)} | {_f(p.entry)} | {_f(p.close)} | {_pct(p.pnl_pct)} | {_f(p.stop)} | {_f(p.new_stop)} | {'; '.join(actions)} |")
+            d = urteil.get(f"TH:{p.thesis_id}")
+            aktion = f"{_ZEICHEN.get(d.verdikt, '')} **{d.verdikt_label}** — {d.begruendung}" if d else "–"
+            L.append(f"| {p.symbol} | {_f(p.shares, 0)} | {_f(p.entry)} | {_f(p.close)} | {_pct(p.pnl_pct)} | "
+                     f"{_f(p.wert_eur, 0)} | {_f(p.stop)} | {_f(p.new_stop)} | {aktion} |")
     L.append("")
 
     # Vorschläge
@@ -102,12 +93,12 @@ def build_markdown(res: WeeklyResult, settings: Settings) -> str:
         L.append("Ablauf je Einstieg: Chart prüfen (Base ≥ 4 Wochen?) → `satellit journal new --symbol … --entry … --stop …` → Montag Limit-Order (tagesgültig) → bei Ausführung `satellit journal open <id> --price … --shares …` → Stop-Market-Order (360 Tage) auf den Initialstop.")
     else:
         L.append("- keine Kandidaten, die alle Regeln erfüllen")
-    if res.skipped:
+    if res.abgelehnt:
         L.append("")
-        L.append("<details><summary>Übersprungen / begrenzt</summary>")
+        L.append("<details><summary>Warum wurde sonst nichts gekauft?</summary>")
         L.append("")
-        for s in res.skipped[:25]:
-            L.append(f"- {s}")
+        for d in res.abgelehnt[:25]:
+            L.append(f"- {d.begruendung}")
         L.append("")
         L.append("</details>")
     L.append("")
@@ -161,17 +152,19 @@ def build_push(res: WeeklyResult, settings: Settings) -> tuple[str, str]:
         lines.append("⛔ KILL-SWITCH AKTIV — keine Einstiege")
     if res.dry_run:
         lines.append("🧪 Trockenlauf — keine Orders")
-    sells = [p.symbol for p in res.positions if p.soft_exit]
-    stops = [f"{p.symbol}→{p.new_stop:.2f}" for p in res.positions if p.stop_raised and not p.soft_exit]
-    hits = [p.symbol for p in res.positions if p.hard_stop_hit]
-    if sells:
-        lines.append("🔻 Verkaufen: " + ", ".join(sells))
-    if hits:
-        lines.append("⚠️ Stop evtl. ausgelöst: " + ", ".join(hits))
-    if stops:
-        lines.append("⬆️ Stops: " + ", ".join(stops))
-    if res.proposals:
-        lines.append("🟢 Kandidaten: " + ", ".join(f"{p.symbol} ({p.shares} Stk, Stop {p.initial_stop:.2f})" for p in res.proposals))
+    # Auch die Push-Nachricht liest die Urteile, statt sie erneut abzuleiten.
+    def _mit(verdikt: str) -> list:
+        return [d for d in res.entscheidungen if d.verdikt == verdikt]
+
+    if sells := _mit(dec.VERKAUFEN):
+        lines.append("🔻 Verkaufen: " + ", ".join(d.symbol for d in sells))
+    if hits := [d for d in _mit(dec.PRUEFEN) if d.art == "satellit_position"]:
+        lines.append("⚠️ Prüfen: " + ", ".join(d.symbol for d in hits))
+    if stops := _mit(dec.STOP_ANHEBEN):
+        lines.append("⬆️ Stops: " + ", ".join(f"{d.symbol}→{_f(d.neuer_stop)}" for d in stops))
+    if kaeufe := _mit(dec.KAUFEN):
+        lines.append("🟢 Kandidaten: " + ", ".join(
+            f"{d.symbol} ({_f(d.stueck, 0)} Stk, Stop {_f(d.stop_kurs)})" for d in kaeufe))
     else:
         lines.append("Keine neuen Kandidaten")
     if res.data_failed:

@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import journal, regime
+from . import journal, regime, view
 from .api import run_weekly_job, serve_api, write_run_status
 from .config import Settings, load_settings
 from .data import build_source, update_prices
@@ -42,6 +42,7 @@ def cmd_weekly(a, s: Settings) -> int:
     try:
         res = run_weekly(s, as_of=as_of, source=source, demo=a.demo, skip_us_scripts=a.skip_us_scripts)
         path = write_report(res, s)
+        view.schreiben(view.bauen(res, s), s)
     except Exception as exc:  # noqa: BLE001
         write_run_status(s, running=False, ok=False, error=str(exc), finished=datetime.now().isoformat(timespec="seconds"))
         raise
@@ -56,6 +57,19 @@ def cmd_weekly(a, s: Settings) -> int:
     write_run_status(s, running=False, ok=True, finished=datetime.now().isoformat(timespec="seconds"),
                      as_of=res.as_of.isoformat(), report=path, pushed=pushed, candidates=len(res.proposals),
                      failed_symbols=len(res.data_failed), demo=a.demo)
+    return 0
+
+
+def cmd_view(a, s: Settings) -> int:
+    """Ansicht ohne Netz neu bauen — zum Prüfen und nach manuellen Journal-Änderungen."""
+    ziel = view.neu_rechnen(s)
+    payload = view.lesen(s) or {}
+    n = len(payload.get("entscheidungen") or [])
+    dringend = sum(1 for d in payload.get("entscheidungen") or [] if d.get("dringlichkeit", 0) >= 1)
+    print(f"{ziel} geschrieben — {n} Entscheidungen, davon {dringend} zu erledigen")
+    for d in (payload.get("entscheidungen") or [])[:10]:
+        if d.get("dringlichkeit", 0) >= 1:
+            print(f"  [{d['verdikt_label']}] {d.get('symbol') or d.get('name')}: {d['begruendung']}")
     return 0
 
 
@@ -275,6 +289,9 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--skip-us-scripts", action="store_true", help="US-Skills nicht ausführen (letzten Stand nutzen)")
     w.add_argument("--no-push", action="store_true")
     w.set_defaults(func=cmd_weekly)
+
+    v = sub.add_parser("view", help="Ansicht (state/view_latest.json) ohne Netz neu bauen")
+    v.set_defaults(func=cmd_view)
 
     u = sub.add_parser("universe", help="Konstituenten laden/prüfen/importieren")
     u.add_argument("--force", action="store_true")

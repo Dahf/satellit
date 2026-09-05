@@ -17,7 +17,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import journal, regime, universe
+from . import journal, regime, universe, view
 from .config import Settings
 from .data import build_source
 from .fx import FxTable, load_fx
@@ -69,6 +69,7 @@ def run_weekly_job(settings: Settings, push: bool = True, as_of: date | None = N
                          error=None, fortschritt=None)
         res = run_weekly(settings, as_of=as_of, demo=demo, progress=fortschritt)
         path = write_report(res, settings)
+        view.schreiben(view.bauen(res, settings), settings)
         title, msg = build_push(res, settings)
         pushed = False
         if push:
@@ -205,6 +206,24 @@ ACTIONS = {
 
 
 # ---------------------------------------------------------------------- server
+def ansicht_auffrischen(settings: Settings) -> bool:
+    """view_latest.json nach einer schreibenden Aktion neu bauen.
+
+    Läuft gerade ein Wochenlauf, wird übersprungen: er schreibt die Ansicht am Ende ohnehin,
+    und zwei gleichzeitige Schreiber auf dieselbe Datei sind der sichere Weg zu halbem JSON.
+    Ein Fehlschlag darf die Aktion nie scheitern lassen — die Buchung ist schon passiert.
+    """
+    if _RUN_LOCK.locked():
+        log.info("Ansicht nicht aufgefrischt: Wochenlauf aktiv")
+        return False
+    try:
+        view.neu_rechnen(settings)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Ansicht konnte nicht aufgefrischt werden: %s", exc)
+        return False
+
+
 def make_handler(settings: Settings, token: str):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code: int, payload: dict) -> None:
@@ -254,10 +273,13 @@ def make_handler(settings: Settings, token: str):
                 self._send(404, {"ok": False, "error": "not found"})
                 return
             try:
-                self._send(200, {"ok": True, "result": fn(settings, body)})
+                ergebnis = fn(settings, body)
             except Exception as exc:  # noqa: BLE001
                 log.warning("API %s fehlgeschlagen: %s", self.path, exc)
                 self._send(400, {"ok": False, "error": str(exc)})
+                return
+            ansicht_auffrischen(settings)
+            self._send(200, {"ok": True, "result": ergebnis})
 
     return Handler
 
