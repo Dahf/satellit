@@ -1,12 +1,21 @@
+# Variablen kommen aus der lokalen .env (Compose lädt sie automatisch) oder,
+# bei Portainer, aus den Stack-Umgebungsvariablen im UI. Kein env_file:, sonst
+# schlägt der Deploy fehl, sobald keine .env im Stack-Verzeichnis liegt.
+
 services:
   satellit:
     build: .
     image: satellit:latest
     container_name: satellit
     restart: unless-stopped
-    env_file: .env
     environment:
-      - TZ=Europe/Berlin
+      - TZ=${SATELLIT_TZ:-Europe/Berlin}
+      - SATELLIT_TZ=${SATELLIT_TZ:-Europe/Berlin}
+      - SATELLIT_API_TOKEN=${SATELLIT_API_TOKEN:?fehlt - geteiltes Geheimnis Dashboard <-> API, z. B. openssl rand -hex 32}
+      - PUSHOVER_TOKEN=${PUSHOVER_TOKEN:-}
+      - PUSHOVER_USER=${PUSHOVER_USER:-}
+      - DASHBOARD_URL=${DASHBOARD_URL:-}
+      - STOOQ_APIKEY=${STOOQ_APIKEY:-}
     volumes:
       - ./state:/app/state      # Journal, Kurs-Cache, Berichte, Ampel-Historie
       - ./config:/app/config    # settings.yaml, exclusions.yaml, symbol_overrides.yaml
@@ -19,10 +28,13 @@ services:
     image: satellit-dashboard:latest
     container_name: satellit-dashboard
     restart: unless-stopped
-    env_file: .env
     environment:
+      - TZ=${SATELLIT_TZ:-Europe/Berlin}
       - DATA_DIR=/data
       - SATELLIT_API_URL=http://satellit:8787
+      - SATELLIT_API_TOKEN=${SATELLIT_API_TOKEN:?fehlt - muss identisch zum Wert im satellit-Container sein}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?fehlt - Login-Passwort, lang und zufaellig}
+      - SESSION_SALT=${SESSION_SALT:?fehlt - beliebige Zufallszeichenkette fuer das Session-Cookie}
     volumes:
       - ./state:/data:ro        # Dashboard liest nur; schreiben geht über die API
     ports:
