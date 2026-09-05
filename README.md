@@ -48,19 +48,58 @@ docker compose logs -f
 Ohne Docker: `pip install -r requirements.txt` und `python3 -m satellit …` (Python ≥ 3.11).
 `scripts/smoke_live.sh` fasst die Erstprüfung zusammen.
 
+## Trade Republic anbinden
+
+Trade Republic hat **keine offizielle Schnittstelle**. Der einzige Weg führt über
+[pytr](https://github.com/pytr-org/pytr), einen inoffiziellen Zugang zur privaten App-API.
+
+**pytr läuft auf deinem eigenen Rechner, nicht auf dem Server** — Telefonnummer, PIN und
+Geräteschlüssel kommen damit nie auf eine dauerhaft laufende Maschine.
+
+```bash
+pip install pytr
+python -m pytr login                 # Bestätigungscode in der TR-App
+python -m pytr export_transactions   # erzeugt account_transactions.csv
+```
+
+Die Datei anschließend im Dashboard unter *Einstellungen → Trade Republic* hochladen, oder:
+
+```bash
+docker compose run --rm satellit tr-import /pfad/account_transactions.csv --vorschau
+```
+
+Der Import ist zweistufig: erst wird gezeigt, was gebucht würde, dann bestätigst du. Weil pytr
+immer die vollständige Historie exportiert, prüft der Importer auf Dubletten — ein wiederholter
+Import bucht nichts doppelt. Unbekannte Umsatzarten werden gemeldet, nicht geraten; Splits und
+Abspaltungen bleiben Handarbeit, weil nur du entscheiden kannst, wie der Einstand aufzuteilen ist.
+
+Geprüft mit pytr 0.4.10 (deutsche und englische Spaltenüberschriften). Das Format ist nicht
+zugesagt und kann sich ändern — deshalb die Pflicht-Vorschau.
+
 ## Dashboard (Next.js)
 
 Zweiter Container im selben Compose-Stack (`dashboard/`): Next.js 15 (App Router), Tailwind, shadcn/ui-Komponenten, Recharts.
 Liest das `state/`-Volume **read-only** und schreibt ausschließlich über die Python-API (`satellit serve` startet sie auf Port 8787
 im Compose-Netz, Token `SATELLIT_API_TOKEN`).
 
-| Seite | Inhalt |
+Es gibt **eine** Seite. Sie zeigt keine Kennzahlen-Tabellen, sondern eine Handlungsliste:
+was zu tun ist, wie viel, und auf Abruf warum.
+
+| Bereich | Inhalt |
 |---|---|
-| `/` Übersicht | Letzter Lauf, Ampel USA/EU, Kapital/Drawdown, **Montag erledigen** (Positionen mit Stop-Nachzug/Verkauf), Kandidaten, Watchlist, Statistik, Datenqualität |
-| `/screener` | Alle Titel des letzten Laufs mit Kennzahlen und Flags, Filter nach Kandidat/Watchlist/Top-RS/Region, ältere Läufe wählbar |
-| `/journal`, `/journal/<id>` | Thesen mit Status, P&L, R-Multiple, Stop-Verlauf, Statusverlauf; Kennzahlen (Trefferquote, Expectancy, Profit-Faktor) |
-| `/ampel` | Verlauf der Ampel-Scores (US: Uptrend/Breadth, EU: P200/P50) mit Schwellen, Roh vs. Effektiv |
-| `/aktionen` | These anlegen (mit Positionsgröße), Ausführung eintragen, Stop nachziehen, Schließen, Kapital/Trockenlauf/Kill-Switch, Wochenlauf starten |
+| Kopf | Gesamtwert · Eingezahlt · Gewinn mit Jahresrendite (XIRR) · diesen Monat ausgegeben |
+| Aufteilung | Kern / Satellit / nicht zugeteilt als Balken mit dem 7–15-%-Band aus Trading-Plan 1 |
+| **Das ist zu tun** | Je Zeile: Verdikt, Titel, Menge, ein Satz Begründung, „Warum?" und ein Knopf. Links steht die Fundstelle im Regelwerk (`TP 7`, `Kern 5.3`) als Marginalie |
+| Dein Bestand | Was läuft, ohne Handlungsbedarf |
+| Aufklappbar | „Warum wurde sonst nichts gekauft?" (alle Ablehnungsgründe + Screener-Trichter) und „Daten und Technik" |
+| Einstellungen | Wochenlauf, Kapital, Trockenlauf, Kill-Switch, Trade-Republic-Import, Konstituenten-Upload |
+
+Ist noch nichts eingerichtet, führt die Seite stattdessen durch die Ersteinrichtung.
+
+Die Ampel ist kein eigener Reiter mehr: sie wird weiter berechnet und protokolliert, erscheint aber
+dort, wo sie etwas erklärt — im Begründungs-Panel einer Entscheidung. Das Frontend enthält **keine
+Regellogik**; welche Aktion möglich ist und ob sie gesperrt ist, entscheidet `satellit/decisions.py`
+und liefert es im Payload `state/view_latest.json` mit.
 
 Login per Passwort (`DASHBOARD_PASSWORD`), Session-Cookie 30 Tage. Der Port ist in `docker-compose.yml` auf `127.0.0.1:3000` gebunden —
 davor gehört ein Reverse-Proxy mit HTTPS (Caddy: `satellit.example.de { reverse_proxy 127.0.0.1:3000 }`). `DASHBOARD_URL` in `.env`
@@ -72,10 +111,9 @@ openssl rand -hex 16          # -> SESSION_SALT
 docker compose build dashboard && docker compose up -d
 ```
 
-**Hinweis zum Build:** Das Dashboard wurde ohne npm-Zugang geschrieben; Syntax ist geprüft, der erste `npm run build` läuft auf
-deinem Server. `next.config.mjs` hat `typescript.ignoreBuildErrors` an, damit ein Typ-Nit den Container-Build nicht stoppt —
-`cd dashboard && npm install && npm run typecheck` zeigt, ob es welche gibt. Es gibt kein `package-lock.json`; der erste Build
-erzeugt eines, das du einchecken solltest. Weitere shadcn-Komponenten: `npx shadcn@latest add dialog` (components.json liegt bei).
+**Zum Build:** `next.config.mjs` hat `typescript.ignoreBuildErrors` an, damit ein Typ-Nit den
+Container-Build nicht stoppt — `cd dashboard && npm run typecheck` zeigt vor dem Deploy, ob es welche
+gibt. Der Build nutzt `npm ci` gegen das eingecheckte `package-lock.json`.
 
 ### Was beim ersten Lauf zu prüfen ist
 
@@ -104,7 +142,7 @@ erzeugt eines, das du einchecken solltest. Weitere shadcn-Komponenten: `npx shad
 | `portfolio setup --start X --rate Y --etf ISIN` | Depot einrichten: 90/10-Aufteilung, Eröffnungsbuchungen, Trockenlauf |
 | `portfolio show` | Gesamtwert, Kern/Satellit, Einzahlungen, Gewinn, Monatsausgabe, Kauffenster |
 | `ledger add --typ … --topf … --betrag X` / `list [--monat]` / `storno <id>` | Kassenbuch: jede Geldbewegung. Korrektur nur per Gegenbuchung |
-| `tr-import <datei> [--vorschau]` | Umsatzliste aus Trade Republic übernehmen (siehe unten) |
+| `tr-import <datei> [--vorschau]` | Umsatzliste aus Trade Republic übernehmen (erst Vorschau, dann buchen) |
 | `view` | Anzeige-Payload ohne Netz neu bauen |
 | `journal new --symbol SYM [--entry --stop --core]` | These anlegen (liest Kurs/Stop/Sektor aus dem letzten Screener-Lauf) + Positionsgröße |
 | `journal open <id> --price P --shares N [--date D]` | Ausführung eintragen → ACTIVE |

@@ -232,11 +232,16 @@ function TradeRepublicBlock() {
       hinweis="Trade Republic hat keine offizielle Schnittstelle. Der Umweg geht über pytr auf deinem eigenen Rechner — deine Zugangsdaten kommen nie auf diesen Server."
     >
       <ol className="mb-3 space-y-1 text-etikett leading-relaxed text-muted-foreground">
-        <li>1. Einmalig installieren: <code className="font-mono">pipx install pytr</code></li>
-        <li>2. Anmelden: <code className="font-mono">pytr login</code> (Bestätigung in der App)</li>
-        <li>3. Exportieren: <code className="font-mono">pytr export_transactions</code></li>
-        <li>4. Die Datei <code className="font-mono">account_transactions.csv</code> hier hochladen.</li>
+        <li>1. Einmalig installieren: <code className="font-mono">pip install pytr</code></li>
+        <li>2. Anmelden: <code className="font-mono">python -m pytr login</code> — der Code kommt in die TR-App</li>
+        <li>3. Exportieren: <code className="font-mono">python -m pytr export_transactions</code></li>
+        <li>4. Die erzeugte <code className="font-mono">account_transactions.csv</code> hier hochladen.</li>
       </ol>
+      <p className="mb-3 text-marginalie leading-relaxed text-muted-foreground">
+        Geprüft mit pytr 0.4.10. Deutsche und englische Spaltenüberschriften werden beide erkannt.
+        Splits, Abspaltungen und Tauschvorgänge werden nicht automatisch gebucht — sie ändern nur
+        Stückzahlen, und wie der Einstand dabei aufzuteilen ist, kann nur dir klar sein.
+      </p>
 
       <input
         type="file"

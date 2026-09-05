@@ -28,45 +28,66 @@ log = logging.getLogger(__name__)
 
 MAX_ZEILEN = 20_000
 
-# Spalten, die pytr in verschiedenen Fassungen verwendet hat.
+# Spaltenüberschriften. pytr übersetzt sie in die gewählte Sprache (Standard: Systemsprache
+# oder Englisch), deshalb müssen mindestens Deutsch und Englisch abgedeckt sein.
+# Geprüft gegen pytr 0.4.10, `pytr.transactions.CSVCOLUMN_TO_TRANSLATION_KEY`.
 SPALTEN_ALIASE = {
     "datum": {"date", "datum", "timestamp", "zeitpunkt"},
-    "typ": {"type", "typ", "transaction type", "event type", "eventtype"},
-    "wert": {"value", "amount", "betrag", "wert"},
+    "typ": {"type", "typ", "transaction type", "event type"},
+    "wert": {"value", "wert", "amount", "betrag"},
     "isin": {"isin"},
-    "titel": {"note", "notiz", "title", "titel", "name", "description", "beschreibung"},
+    "titel": {"note", "notiz", "title", "titel", "description", "beschreibung"},
     "stueck": {"shares", "stück", "stueck", "quantity", "anzahl"},
-    "gebuehr": {"fee", "fees", "gebühr", "gebuehr"},
-    "steuer": {"tax", "taxes", "steuer", "steuern"},
+    "gebuehr": {"fees", "gebühren", "gebuehren", "fee", "gebühr", "gebuehr"},
+    "steuer": {"taxes", "steuern", "tax", "steuer"},
 }
 
-# TR-Ereignis -> (Buchungstyp, Topf). Was hier nicht steht, wird nicht geraten.
+# TR-Ereignisart -> (Buchungstyp, Topf). Alle Werte stammen aus den Übersetzungstabellen
+# von pytr 0.4.10 (`pytr.event.PPEventType` durch `setup_translation`), nicht aus Vermutung.
+# "?" heißt: der Topf ergibt sich aus der ISIN (Kern-ETF, Kern-Aktie oder Satellit).
+#
+# Ein Sparplan ist bei TR kein eigener Ereignistyp — er kommt als Kauf mit der ETF-ISIN an
+# und wird darüber erkannt.
 TYP_ZUORDNUNG: dict[str, tuple[str, str]] = {
+    # Geld hinein
     "deposit": ("einzahlung", "cash"),
-    "einzahlung": ("einzahlung", "cash"),
-    "incoming transfer": ("einzahlung", "cash"),
-    "payment inbound": ("einzahlung", "cash"),
-    "withdrawal": ("auszahlung", "cash"),
-    "auszahlung": ("auszahlung", "cash"),
-    "payment outbound": ("auszahlung", "cash"),
-    "savings plan": ("sparplan", "kern_etf"),
-    "sparplan": ("sparplan", "kern_etf"),
-    "savings plan execution": ("sparplan", "kern_etf"),
-    "buy": ("kauf", "?"),                 # Topf ergibt sich aus der ISIN
+    "einlage": ("einzahlung", "cash"),
+    "transfer (inbound)": ("einzahlung", "cash"),
+    "umbuchung (eingang)": ("einzahlung", "cash"),
+    # Geld hinaus
+    "removal": ("auszahlung", "cash"),
+    "entnahme": ("auszahlung", "cash"),
+    "transfer (outbound)": ("auszahlung", "cash"),
+    "umbuchung (ausgang)": ("auszahlung", "cash"),
+    # Wertpapiere
+    "buy": ("kauf", "?"),
     "kauf": ("kauf", "?"),
-    "order buy": ("kauf", "?"),
     "sell": ("verkauf", "?"),
     "verkauf": ("verkauf", "?"),
-    "order sell": ("verkauf", "?"),
+    # Erträge
     "dividend": ("dividende", "cash"),
     "dividende": ("dividende", "cash"),
     "interest": ("dividende", "cash"),
     "zinsen": ("dividende", "cash"),
-    "tax": ("steuer", "cash"),
-    "steuer": ("steuer", "cash"),
+    # Kosten
+    "fees": ("gebuehr", "cash"),
+    "gebühren": ("gebuehr", "cash"),
+    "interest charge": ("gebuehr", "cash"),
+    "zinsbelastung": ("gebuehr", "cash"),
+    "taxes": ("steuer", "cash"),
+    "steuern": ("steuer", "cash"),
+    # Erstattungen
     "tax refund": ("korrektur", "cash"),
-    "fee": ("gebuehr", "cash"),
-    "gebuehr": ("gebuehr", "cash"),
+    "steuerrückerstattung": ("korrektur", "cash"),
+    "fees refund": ("korrektur", "cash"),
+    "gebührenerstattung": ("korrektur", "cash"),
+}
+
+# Bekannt, aber bewusst nicht automatisch gebucht: reine Stückzahl-Ereignisse ohne
+# Geldfluss. Sie brauchen eine Entscheidung darüber, wie der Einstand aufgeteilt wird —
+# das kann nur der Depotinhaber. Sie werden gemeldet, nicht geraten.
+NICHT_AUTOMATISCH = {
+    "spinoff": "Abspaltung", "split": "Aktiensplit", "swap": "Tausch",
 }
 
 
@@ -132,7 +153,11 @@ def parse_tr_csv(text: str, plan=None) -> tuple[list[Buchung], list[str]]:
         if not datum:
             warnungen.append(f"Zeile {nr}: Datum {zelle(row, 'datum')!r} nicht lesbar — übersprungen.")
             continue
-        roh_typ = re.sub(r"[_\-]+", " ", zelle(row, "typ")).strip().lower()
+        roh_typ = re.sub(r"\s+", " ", zelle(row, "typ")).strip().lower()
+        if roh_typ in NICHT_AUTOMATISCH:
+            warnungen.append(f"Zeile {nr}: {NICHT_AUTOMATISCH[roh_typ]} ({zelle(row, 'titel')[:40]}) — "
+                             f"verändert nur die Stückzahl, nicht das Geld. Bitte von Hand buchen.")
+            continue
         zuordnung = TYP_ZUORDNUNG.get(roh_typ)
         if zuordnung is None:
             warnungen.append(f"Zeile {nr}: Art {zelle(row, 'typ')!r} unbekannt — übersprungen, "

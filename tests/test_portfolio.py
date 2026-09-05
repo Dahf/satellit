@@ -387,62 +387,89 @@ class TestPlanIO(unittest.TestCase):
         self.assertTrue(any(e["isin"] == "IE00BK5BQT80" for e in katalog))
 
 
-TR_CSV = """Date;Type;Value;ISIN;Note;Shares;Fee
-2026-09-06;Deposit;5000,00;;Überweisung;;
-2026-09-07;Savings plan;-450,00;IE00BK5BQT80;Vanguard FTSE All-World;2,6779;0,00
-2026-10-01;Savings plan;-450,00;IE00BK5BQT80;Vanguard FTSE All-World;2,5411;0,00
-2026-10-07;Buy;-2178,40;US0378331005;Apple Inc;12;1,00
-2026-11-02;Dividend;12,50;US0378331005;Apple Dividende;;
-2026-11-03;Kaffeekasse;-3,50;;Was auch immer;;
-2026-11-04;Sell;900,00;US0378331005;Apple Inc;5;1,00
-;;;;;;
+# Spalten, Reihenfolge, Trennzeichen und Ereignisnamen geprüft gegen pytr 0.4.10
+# (pytr.transactions.CSVCOLUMN_TO_TRANSLATION_KEY und pytr.event.PPEventType).
+# Standard: Semikolon, Datum mit Uhrzeit, Punkt als Dezimaltrennzeichen, Vorzeichen am Wert.
+TR_CSV_EN = """Date;Type;Value;Note;ISIN;Shares;Fees;Taxes;ISIN2;Shares2
+2026-09-06T09:14:00;Deposit;5000.0;Überweisung;;;;;;
+2026-09-07T14:02:11;Buy;-3600.0;Vanguard FTSE All-World;IE00BK5BQT80;21.4218;0.0;;;
+2026-10-07T15:41:03;Buy;-2178.4;Apple Inc;US0378331005;12;1.0;;;
+2026-11-02T08:00:00;Dividend;12.5;Apple Inc;US0378331005;;;1.75;;
+2026-11-03T08:00:00;Taxes;-4.2;Kapitalertragsteuer;;;;;;
+2026-11-04T16:20:00;Sell;900.0;Apple Inc;US0378331005;5;1.0;;;
+2026-11-05T08:00:00;Split;0.0;Apple Inc;US0378331005;12;;;;
+2026-11-06T08:00:00;Kaffeekasse;-3.5;Gibt es nicht;;;;;;
+;;;;;;;;;
+"""
+
+# Dieselben Vorgänge mit deutschen Überschriften und Ereignisnamen.
+TR_CSV_DE = """Datum;Typ;Wert;Notiz;ISIN;Stück;Gebühren;Steuern;ISIN2;Stück2
+06.09.2026;Einlage;5.000,00;Überweisung;;;;;;
+07.09.2026;Kauf;-3.600,00;Vanguard FTSE All-World;IE00BK5BQT80;21,4218;0,00;;;
+04.11.2026;Entnahme;200,00;Abhebung;;;;;;
 """
 
 
 class TestTrImport(unittest.TestCase):
-    """Die pytr-CSV ist ein undokumentiertes Fremdformat — der Parser muss misstrauisch sein."""
+    """Die pytr-CSV ist ein Fremdformat ohne Zusage — der Parser muss misstrauisch sein."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.s = einstellungen(self.tmp.name)
-        plan = pf.Plan(etf={"isin": "IE00BK5BQT80", "symbol": "VWCE.DE", "anteil_kern": 0.8},
-                       onboarding_erledigt=True)
-        pf.speichere_plan(self.s, plan)
+        pf.speichere_plan(self.s, pf.Plan(
+            etf={"isin": "IE00BK5BQT80", "symbol": "VWCE.DE", "anteil_kern": 0.8},
+            onboarding_erledigt=True))
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_zuordnung_und_unbekanntes(self):
-        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV, pf.lade_plan(self.s))
+    def test_englisches_format(self):
+        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
         nach_typ = {b.typ for b in buchungen}
         self.assertIn("einzahlung", nach_typ)
-        self.assertIn("sparplan", nach_typ)           # ETF-ISIN -> Kern
-        self.assertIn("satellit_kauf", nach_typ)      # fremde ISIN -> Satellit
+        self.assertIn("sparplan", nach_typ)          # Kauf mit der ETF-ISIN -> Kern
+        self.assertIn("satellit_kauf", nach_typ)     # fremde ISIN -> Satellit
         self.assertIn("satellit_verkauf", nach_typ)
         self.assertIn("dividende", nach_typ)
-        # Unbekannte Art wird gemeldet, nicht geraten.
-        self.assertTrue(any("Kaffeekasse" in w for w in warnungen), warnungen)
-        self.assertNotIn("kaffeekasse", {b.typ for b in buchungen})
+        self.assertIn("steuer", nach_typ)
 
-    def test_deutsche_zahlen_und_betraege_ohne_vorzeichen(self):
-        buchungen, _ = tr_import.parse_tr_csv(TR_CSV, pf.lade_plan(self.s))
-        sparplan = next(b for b in buchungen if b.typ == "sparplan")
-        self.assertAlmostEqual(sparplan.betrag_eur, 450.0)     # Minuszeichen fällt weg
-        self.assertAlmostEqual(sparplan.stueck, 2.6779)
+    def test_deutsches_format(self):
+        """pytr übersetzt Überschriften UND Ereignisnamen — beides muss erkannt werden."""
+        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_DE, pf.lade_plan(self.s))
+        self.assertEqual([b.typ for b in buchungen], ["einzahlung", "sparplan", "auszahlung"])
+        self.assertAlmostEqual(buchungen[0].betrag_eur, 5000.0)     # 5.000,00 deutsch gelesen
+        self.assertAlmostEqual(buchungen[1].stueck, 21.4218)
+        self.assertEqual(buchungen[0].datum, "2026-09-06")          # TT.MM.JJJJ
+
+    def test_vorzeichen_und_gebuehren(self):
+        buchungen, _ = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
         kauf = next(b for b in buchungen if b.typ == "satellit_kauf")
+        self.assertAlmostEqual(kauf.betrag_eur, 2178.4)             # Minuszeichen fällt weg
         self.assertAlmostEqual(kauf.gebuehr_eur, 1.0)
+        self.assertAlmostEqual(kauf.stueck, 12.0)
+
+    def test_stueckzahl_ereignisse_werden_nicht_geraten(self):
+        """Split, Spinoff und Swap ändern nur Stückzahlen — das kann nur der Nutzer entscheiden."""
+        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
+        self.assertTrue(any("Aktiensplit" in w for w in warnungen), warnungen)
+        self.assertEqual(sum(1 for b in buchungen if b.notiz.startswith("Apple") and b.stueck == 12
+                             and b.typ not in ("satellit_kauf",)), 0)
+
+    def test_unbekannte_art_wird_gemeldet(self):
+        _buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
+        self.assertTrue(any("Kaffeekasse" in w for w in warnungen), warnungen)
 
     def test_wiederholter_import_bucht_nichts_doppelt(self):
         """pytr exportiert immer die ganze Historie — ohne Abgleich verdoppelt sich alles."""
-        erst = tr_import.uebernehmen(self.s, TR_CSV)
+        erst = tr_import.uebernehmen(self.s, TR_CSV_EN)
         self.assertGreater(erst["gebucht"], 0)
-        zweit = tr_import.uebernehmen(self.s, TR_CSV)
+        zweit = tr_import.uebernehmen(self.s, TR_CSV_EN)
         self.assertEqual(zweit["gebucht"], 0)
         self.assertEqual(zweit["bereits_gebucht"], erst["gebucht"])
         self.assertEqual(len(pf.lies_ledger(self.s)), erst["gebucht"])
 
     def test_vorschau_schreibt_nicht(self):
-        v = tr_import.vorschau(self.s, TR_CSV)
+        v = tr_import.vorschau(self.s, TR_CSV_EN)
         self.assertGreater(v["neu"], 0)
         self.assertEqual(len(pf.lies_ledger(self.s)), 0)
         self.assertEqual(v["zeitraum"][0], "2026-09-06")
@@ -450,13 +477,27 @@ class TestTrImport(unittest.TestCase):
     def test_datumsformate(self):
         self.assertEqual(tr_import._datum("06.09.2026"), "2026-09-06")
         self.assertEqual(tr_import._datum("2026-09-06"), "2026-09-06")
-        self.assertEqual(tr_import._datum("2026-09-06T14:33:00Z"), "2026-09-06")
+        self.assertEqual(tr_import._datum("2026-09-06T14:33:00"), "2026-09-06")
         self.assertIsNone(tr_import._datum("irgendwann"))
 
     def test_fremde_datei_wird_klar_abgelehnt(self):
         with self.assertRaises(ValueError) as ctx:
             tr_import.parse_tr_csv("a,b,c\n1,2,3\n", None)
         self.assertIn("pytr", str(ctx.exception))
+
+    def test_alle_bekannten_ereignisarten_sind_abgedeckt(self):
+        """Wortlaute aus pytr 0.4.10. Fügt pytr eine Art hinzu, fällt das hier auf —
+        allerdings erst beim Aktualisieren dieser Liste, nicht von selbst."""
+        aus_pytr_en = {"Buy", "Deposit", "Dividend", "Fees", "Fees Refund", "Interest",
+                       "Interest Charge", "Removal", "Sell", "Spinoff", "Split", "Swap",
+                       "Tax Refund", "Taxes", "Transfer (Inbound)", "Transfer (Outbound)"}
+        aus_pytr_de = {"Dividende", "Einlage", "Entnahme", "Gebühren", "Gebührenerstattung",
+                       "Kauf", "Spinoff", "Split", "Steuern", "Steuerrückerstattung", "Swap",
+                       "Umbuchung (Ausgang)", "Umbuchung (Eingang)", "Verkauf", "Zinsbelastung",
+                       "Zinsen"}
+        bekannt = set(tr_import.TYP_ZUORDNUNG) | set(tr_import.NICHT_AUTOMATISCH)
+        for art in aus_pytr_en | aus_pytr_de:
+            self.assertIn(art.lower(), bekannt, f"{art} wird weder gebucht noch bewusst übersprungen")
 
 
 class TestAktionsWhitelist(unittest.TestCase):
