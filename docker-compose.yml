@@ -50,10 +50,10 @@ services:
       - satellit
     networks:
       - internal               # erreicht satellit:8787
-      - traefik_proxy_net      # erreichbar für Traefik
+      - traefik_proxy-net      # erreichbar für Traefik
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=traefik_proxy_net"
+      - "traefik.docker.network=traefik_proxy-net"
       # Router
       - "traefik.http.routers.satellit.rule=Host(`${DASHBOARD_HOST:-satellit.silasbeckmann.de}`)"
       - "traefik.http.routers.satellit.entrypoints=web,websecure"
@@ -72,5 +72,5 @@ services:
 
 networks:
   internal:
-  traefik_proxy_net:
+  traefik_proxy-net:
     external: true
