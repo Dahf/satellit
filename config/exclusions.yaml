@@ -1,11 +1,16 @@
 # Titel, die der Screener ausblendet.
-# - core_holdings: ISINs der Kern-Aktien (Regel 3.5: kein Doppelhalten)
-# - not_tradable: ISINs, die bei Trade Republic nicht handelbar sind
+# - core_holdings: Kern-Aktien (Regel 3.5: kein Doppelhalten)
+# - not_tradable: bei Trade Republic nicht handelbar
 # - manual: sonstige Ausschlüsse mit Begründung
+#
+# Jeder Eintrag wird über "isin" ODER "symbol" erkannt. Die iShares-Dateien liefern seit
+# 09/2026 keine ISIN-Spalte mehr — deshalb ist "symbol" (das Yahoo-Symbol, so wie es im
+# Screener steht) derzeit der verlässliche Schlüssel. Beides zusammen ist erlaubt.
 core_holdings: []
-#  - isin: DE0007164600
+#  - symbol: SAP.DE
+#    isin: DE0007164600
 #    note: "SAP — Kern-Aktie seit 2026-10"
 not_tradable: []
-#  - isin: CH0012221716
+#  - symbol: NESN.SW
 #    note: "bei TR nicht handelbar (Stand 2026-09)"
 manual: []

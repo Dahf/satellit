@@ -13,17 +13,25 @@ universe:
     US:
       name: "S&P 500"
       currency: USD
-      # iShares Core S&P 500 UCITS ETF (SXR8) — deutsche iShares-Seite liefert ISIN + Börse.
-      # Link auf der Produktseite: "Positionen herunterladen" (CSV). Bei Änderung hier eintragen.
-      ishares_url: "https://www.ishares.com/de/privatanleger/de/produkte/253743/ishares-sp-500-b-ucits-etf-acc-fund/1478358465952.ajax?fileType=csv&fileName=SXR8_holdings&dataType=fund"
+      # Quellen werden der Reihe nach probiert. Der referer holt vorher die Produktseite und
+      # setzt die Cookies, die der iShares-CDN erwartet — ohne ihn kommt meist ein 403.
+      # Link auf der Produktseite: "Positionen herunterladen" (CSV).
+      quellen:
+        # iShares Core S&P 500 UCITS ETF (SXR8), deutsche Seite. Geprüft 09/2026: 504 Titel.
+        - typ: ishares_csv
+          url: "https://www.ishares.com/de/privatanleger/de/produkte/253743/ishares-sp-500-b-ucits-etf-acc-fund/1478358465952.ajax?fileType=csv&fileName=SXR8_holdings&dataType=fund"
+          referer: "https://www.ishares.com/de/privatanleger/de/produkte/253743/"
       local_file: "state/universe/SXR8_holdings.csv"   # Fallback: manuell heruntergeladene Datei
       index_symbol: "^GSPC"
       yahoo_suffix_default: ""
     EU:
       name: "STOXX Europe 600"
       currency: EUR
-      # iShares STOXX Europe 600 UCITS ETF (DE) (EXSA)
-      ishares_url: "https://www.ishares.com/de/privatanleger/de/produkte/251931/ishares-stoxx-europe-600-ucits-etf-de-fund/1478358465952.ajax?fileType=csv&fileName=EXSA_holdings&dataType=fund"
+      quellen:
+        # iShares STOXX Europe 600 UCITS ETF (DE) (EXSA). Geprüft 09/2026: 600 Titel.
+        - typ: ishares_csv
+          url: "https://www.ishares.com/de/privatanleger/de/produkte/251931/ishares-stoxx-europe-600-ucits-etf-de-fund/1478358465952.ajax?fileType=csv&fileName=EXSA_holdings&dataType=fund"
+          referer: "https://www.ishares.com/de/privatanleger/de/produkte/251931/"
       local_file: "state/universe/EXSA_holdings.csv"
       index_symbol: "EXSA.DE"      # Index-Proxy für die EU-Ampel (ETF-Kurs, in EUR)
       yahoo_suffix_default: null   # wird aus der Börse abgeleitet
@@ -35,7 +43,12 @@ universe:
 
 data:
   primary: yfinance                # yfinance | stooq | fixture
+  # Stooq ist derzeit KEIN funktionierender Ersatz: der CSV-Endpunkt /q/d/l/ antwortet seit
+  # 09/2026 mit 404 (geprüft ohne und mit Schlüssel; einen Schlüssel gibt es nicht zu holen).
+  # Die tatsächliche Absicherung ist der Kurs-Cache in state/prices plus die Alterungsregel —
+  # ab data.max_stale_age_days werden keine Kaufvorschläge mehr erzeugt.
   fallback: stooq
+  max_stale_age_days: 7            # ältere Kurse -> keine neuen Kaufvorschläge
   cache_dir: state/prices
   history_days: 420                # Erstbefüllung
   batch_size: 80                   # Ticker je yfinance-Download

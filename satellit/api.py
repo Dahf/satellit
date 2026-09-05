@@ -11,12 +11,13 @@ import json
 import logging
 import os
 import threading
+import time
 import traceback
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import journal, regime
+from . import journal, regime, universe
 from .config import Settings
 from .data import build_source
 from .fx import FxTable, load_fx
@@ -52,9 +53,21 @@ def run_weekly_job(settings: Settings, push: bool = True, as_of: date | None = N
 
     if not _RUN_LOCK.acquire(blocking=False):
         return {"ok": False, "error": "Ein Lauf ist bereits aktiv"}
+
+    letzte_meldung = [0.0]
+
+    def fortschritt(fertig: int, gesamt: int) -> None:
+        # Höchstens alle 5 s schreiben — der Erstlauf meldet sonst hunderte Male.
+        jetzt = time.monotonic()
+        if fertig < gesamt and jetzt - letzte_meldung[0] < 5.0:
+            return
+        letzte_meldung[0] = jetzt
+        write_run_status(settings, fortschritt={"geladen": fertig, "gesamt": gesamt})
+
     try:
-        write_run_status(settings, running=True, started=datetime.now().isoformat(timespec="seconds"), error=None)
-        res = run_weekly(settings, as_of=as_of, demo=demo)
+        write_run_status(settings, running=True, started=datetime.now().isoformat(timespec="seconds"),
+                         error=None, fortschritt=None)
+        res = run_weekly(settings, as_of=as_of, demo=demo, progress=fortschritt)
         path = write_report(res, settings)
         title, msg = build_push(res, settings)
         pushed = False
@@ -163,12 +176,31 @@ def action_account(settings: Settings, body: dict) -> dict:
     return acc.__dict__
 
 
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
+
+
+def action_universe_import(settings: Settings, body: dict) -> dict:
+    """Holdings-CSV aus dem Dashboard übernehmen.
+
+    Das Dashboard mountet state/ nur lesend, deshalb schickt der Browser den Dateiinhalt
+    hierher statt ihn selbst abzulegen.
+    """
+    inhalt = body.get("inhalt") or ""
+    if not inhalt.strip():
+        raise ValueError("Kein Dateiinhalt übermittelt")
+    if len(inhalt.encode("utf-8")) > MAX_IMPORT_BYTES:
+        raise ValueError(f"Datei zu groß (Grenze {MAX_IMPORT_BYTES // 1024 // 1024} MB)")
+    anzahl, ziel = universe.import_holdings(settings, str(body.get("region") or "").upper(), inhalt)
+    return {"region": body.get("region"), "titel": anzahl, "datei": ziel.name}
+
+
 ACTIONS = {
     "/journal/new": action_journal_new,
     "/journal/open": action_journal_open,
     "/journal/close": action_journal_close,
     "/journal/stop": action_journal_stop,
     "/account": action_account,
+    "/universe/import": action_universe_import,
 }
 
 

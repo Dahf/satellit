@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -66,6 +67,17 @@ def _stale_days(df: pd.DataFrame, today: date) -> int:
 # ------------------------------------------------------------------------- sources
 class PriceSource(ABC):
     name = "abstract"
+    progress: Callable[[int, int], None] | None = None    # (fertig, gesamt), optional
+
+    def _melde(self, fertig: int, gesamt: int) -> None:
+        """Fortschritt melden. Der Erstlauf lädt ~1.100 Symbole und dauert Minuten —
+        ohne diese Meldung sieht das Dashboard währenddessen einfach nur leer aus."""
+        if not self.progress:
+            return
+        try:
+            self.progress(fertig, gesamt)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Fortschrittsmeldung fehlgeschlagen: %s", exc)   # nie den Lauf kippen
 
     @abstractmethod
     def fetch(self, symbols: list[str], start: date, end: date | None = None) -> FetchResult:
@@ -130,13 +142,22 @@ class YFinanceSource(PriceSource):
                         res.frames[s] = df
                 except Exception as exc:  # noqa: BLE001
                     res.failed[s] = f"Parse-Fehler: {exc}"
+            self._melde(min(i + self.batch_size, len(symbols)), len(symbols))
             if i + self.batch_size < len(symbols):
                 time.sleep(self.pause)
         return res
 
 
 class StooqSource(PriceSource):
-    """Fallback. Seit 04/2026 ist ein (kostenloser) API-Key nötig: STOOQ_APIKEY.
+    """Fallback über den CSV-Download von stooq.com — derzeit funktionslos.
+
+    Stand 09/2026 antwortet der Endpunkt /q/d/l/ mit HTTP 404 ("The page you requested does
+    not exist or has been moved"), mit und ohne Schlüssel. Einen STOOQ_APIKEY gibt es entgegen
+    einer früheren Annahme in diesem Code nicht zu beziehen. Der Schlüssel wird deshalb nur
+    noch angehängt, wenn er gesetzt ist, und der Abruf läuft in jedem Fall — ein Fehlschlag
+    landet sauber je Symbol in `failed`, statt die Quelle vorab stumm abzuschalten.
+
+    Die reale Absicherung gegen einen yfinance-Ausfall ist der Kurs-Cache, nicht diese Quelle.
 
     Verifizierte Suffixe: .us, .de, .uk. Andere Börsen werden versucht, sind aber nicht verifiziert.
     """
@@ -168,17 +189,17 @@ class StooqSource(PriceSource):
 
         res = FetchResult()
         if not self.apikey:
-            res.notes.append("Stooq: kein STOOQ_APIKEY gesetzt — Fallback inaktiv")
-            for s in symbols:
-                res.failed[s] = "Stooq ohne API-Key"
-            return res
-        for s in symbols:
+            res.notes.append("Stooq: ohne STOOQ_APIKEY — Abruf gegen das öffentliche Tageslimit")
+        for i, s in enumerate(symbols):
             ss = self.to_stooq_symbol(s)
             if ss is None:
                 res.failed[s] = "Stooq: Börse nicht abgebildet"
+                self._melde(i + 1, len(symbols))
                 continue
             url = (f"https://stooq.com/q/d/l/?s={ss}&i=d&d1={start.strftime('%Y%m%d')}"
-                   f"&d2={(end or date.today()).strftime('%Y%m%d')}&apikey={self.apikey}")
+                   f"&d2={(end or date.today()).strftime('%Y%m%d')}")
+            if self.apikey:
+                url += f"&apikey={self.apikey}"
             try:
                 r = requests.get(url, timeout=30)
                 text = r.text
@@ -192,6 +213,7 @@ class StooqSource(PriceSource):
                     res.frames[s] = df
             except Exception as exc:  # noqa: BLE001
                 res.failed[s] = f"Stooq: {exc}"
+            self._melde(i + 1, len(symbols))
             time.sleep(self.pause)
         return res
 
@@ -300,8 +322,13 @@ class PriceCache:
 # ------------------------------------------------------------------------- update
 def update_prices(settings: Settings, symbols: list[str], scales: dict[str, float] | None = None,
                   source: PriceSource | None = None, fallback: PriceSource | None = None,
-                  today: date | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, str], list[str]]:
+                  today: date | None = None,
+                  progress: Callable[[int, int], None] | None = None,
+                  ) -> tuple[dict[str, pd.DataFrame], dict[str, str], list[str]]:
     """Cache aktualisieren und alle Kursreihen zurückgeben.
+
+    `progress(fertig, gesamt)` wird während des Ladens aufgerufen — der Erstlauf dauert
+    Minuten, und ohne Rückmeldung ist von außen nicht zu unterscheiden, ob er läuft oder hängt.
 
     Returns: (frames, failed, notes)
     """
@@ -309,6 +336,10 @@ def update_prices(settings: Settings, symbols: list[str], scales: dict[str, floa
     scales = scales or {}
     cache = PriceCache(settings.cache_dir)
     source = source or build_source(settings)
+    if progress is not None:
+        source.progress = progress
+        if fallback is not None:
+            fallback.progress = progress
     history_days = int(settings.get("data.history_days", 420))
     max_stale = int(settings.get("data.max_stale_days", 5))
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -17,12 +19,15 @@ sys.path.insert(0, str(ROOT))
 
 from satellit import indicators as ind  # noqa: E402
 from satellit import journal, regime  # noqa: E402
-from satellit.config import load_settings  # noqa: E402
+from satellit.config import Settings, load_settings  # noqa: E402
 from satellit.data import StooqSource, SyntheticSource, _clean  # noqa: E402
 from satellit.fx import FxTable  # noqa: E402
 from satellit.pipeline import Proposal, select_entries  # noqa: E402
 from satellit.screener import ScreenerContext, run_screener  # noqa: E402
-from satellit.universe import Constituent, parse_ishares_csv, parse_number, to_yahoo_symbol  # noqa: E402
+from satellit.universe import (  # noqa: E402
+    Constituent, _download, apply_overrides, import_holdings, load_universe, parse_ishares_csv,
+    parse_number, save_universe_snapshot, snapshot_aktualisieren, to_yahoo_symbol,
+)
 
 GERMAN_CSV = """Fondsname,iShares STOXX Europe 600 UCITS ETF (DE)
 Positionen zum,"04.Sep.2026"
@@ -239,6 +244,125 @@ class TestSynthetic(unittest.TestCase):
         res = SyntheticSource(days=50).fetch(["A", "B"], date(2026, 1, 1), date(2026, 9, 4))
         self.assertEqual(set(res.frames), {"A", "B"})
         self.assertEqual(list(res.frames["A"].columns), ["open", "high", "low", "close", "volume"])
+
+
+class TestUniversumQuellen(unittest.TestCase):
+    """Das Universum muss auch dann stehen, wenn der iShares-Download ausfällt."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        raw = copy.deepcopy(load_settings(ROOT / "config" / "settings.yaml").raw)
+        # Nur eine Region, damit der Test nicht an der echten Konfiguration hängt.
+        raw["universe"]["regions"] = {
+            "EU": {"name": "Test", "currency": "EUR",
+                   "quellen": [{"typ": "ishares_csv", "url": "https://example.invalid/a.csv"}],
+                   "local_file": "state/universe/EXSA_holdings.csv"},
+        }
+        self.settings = Settings(raw=raw, root=Path(self.tmp.name))
+        self.settings.ensure_dirs()
+        self.snapshot = self.settings.universe_dir / "universe_snapshot.csv"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_snapshot_rettet_bei_download_ausfall(self):
+        cons = parse_ishares_csv(GERMAN_CSV, "EU")
+        save_universe_snapshot(cons, self.snapshot)
+        with mock.patch("satellit.universe._download", side_effect=RuntimeError("HTTP 403, Content-Type text/html")):
+            geladen, warnungen, status = load_universe(self.settings)
+        self.assertEqual(len(geladen), len(cons))
+        self.assertEqual(status["EU"]["quelle"], "snapshot")
+        self.assertTrue(status["EU"]["ok"])
+        self.assertTrue(any("403" in w for w in warnungen), warnungen)
+
+    def test_ohne_jede_quelle_faellt_die_region_sichtbar_aus(self):
+        with mock.patch("satellit.universe._download", side_effect=RuntimeError("HTTP 403")):
+            geladen, _warnungen, status = load_universe(self.settings)
+        self.assertEqual(geladen, [])
+        self.assertFalse(status["EU"]["ok"])
+        self.assertIsNone(status["EU"]["quelle"])
+
+    def test_snapshot_wird_nicht_ueber_sich_selbst_geschrieben(self):
+        """Sonst setzt das Neuschreiben die mtime zurück und verschleiert das Alter."""
+        cons = parse_ishares_csv(GERMAN_CSV, "EU")
+        save_universe_snapshot(cons, self.snapshot)
+        vorher = self.snapshot.stat().st_mtime
+        self.assertFalse(snapshot_aktualisieren(cons, {"EU": {"quelle": "snapshot"}}, self.snapshot))
+        self.assertEqual(self.snapshot.stat().st_mtime, vorher)
+        self.assertTrue(snapshot_aktualisieren(cons, {"EU": {"quelle": "download"}}, self.snapshot))
+
+    def test_import_holdings_validiert_vor_dem_schreiben(self):
+        anzahl, ziel = import_holdings(self.settings, "EU", GERMAN_CSV)
+        self.assertEqual(anzahl, 4)                 # vier Aktien, die Cash-Zeile fällt raus
+        self.assertTrue(ziel.exists())
+        with self.assertRaises(ValueError):
+            import_holdings(self.settings, "XX", GERMAN_CSV)
+        with self.assertRaises(ValueError):
+            import_holdings(self.settings, "EU", "irgendwas,ohne,tabellenkopf")
+
+    def test_download_nennt_den_grund(self):
+        antwort = mock.Mock(status_code=403, headers={"Content-Type": "text/html"}, text="<html>denied</html>")
+        with mock.patch("satellit.universe.requests.Session") as Session, \
+             mock.patch("satellit.universe.time.sleep"):
+            Session.return_value.headers = {}
+            Session.return_value.get.return_value = antwort
+            with self.assertRaises(RuntimeError) as ctx:
+                _download("https://example.invalid/a.csv")
+        self.assertIn("403", str(ctx.exception))
+        self.assertIn("text/html", str(ctx.exception))
+
+
+class TestIsharesEchtformat(unittest.TestCase):
+    """Fälle aus den echten Dateien (Stand 09/2026), die den Parser vorher gekippt haben."""
+
+    # Ohne ISIN-Spalte, mit der iShares-Fußzeile aus einem geschützten Leerzeichen.
+    US_CSV = (
+        'Fondsposition per,"03.Sept.2026"\n'
+        ' \n'
+        'Emittententicker,Name,Sektor,Anlageklasse,Marktwert,Gewichtung (%),Nominalwert,'
+        'Nominale,Kurs,Standort,Börse,Marktwährung\n'
+        '"NVDA","NVIDIA","IT","Aktien","1,0","8,28","1,0","5,0","228,45","Vereinigte Staaten","NASDAQ","USD"\n'
+        '"BRK B","BERKSHIRE B","Finanzen","Aktien","1,0","1,60","1,0","5,0","500,00","Vereinigte Staaten","New York Stock Exchange Inc.","USD"\n'
+        '"ESU6","S&P500 EMINI SEP 26","Cash und/oder Derivate","Futures","0,00","0,00","1,0","9,0","7.754,75","-","Index And Options Market","USD"\n'
+        '\xa0\n'
+    )
+
+    NORDIC_CSV = (
+        'Fondsname,iShares STOXX Europe 600\n'
+        'Positionen zum,"04.Sep.2026"\n'
+        '\n'
+        'Emittententicker,Name,Sektor,Anlageklasse,Gewichtung (%),Börse,Marktwährung\n'
+        '"VOLV B","VOLVO B","Industrie","Aktien","0,40","Nasdaq Omx Nordic","SEK"\n'
+        '"NOVO B","NOVO NORDISK B","Gesundheit","Aktien","1,90","Nasdaq Omx Nordic","DKK"\n'
+        '"NOKIA","NOKIA OYJ","IT","Aktien","0,30","Nasdaq Omx Nordic","EUR"\n'
+    )
+
+    def test_fusszeile_und_fehlende_isin_kippen_den_parser_nicht(self):
+        cons = parse_ishares_csv(self.US_CSV, "US")
+        self.assertEqual([c.symbol for c in cons], ["NVDA", "BRK-B"])   # Futures fliegen raus
+        self.assertTrue(all(c.isin == "" for c in cons))                # Datei hat keine ISIN-Spalte
+
+    def test_nasdaq_omx_nordic_wird_ueber_die_waehrung_aufgeloest(self):
+        """Ohne diese Regel greift die generische nasdaq-Regel und macht US-Symbole daraus."""
+        symbole = [c.symbol for c in parse_ishares_csv(self.NORDIC_CSV, "EU")]
+        self.assertEqual(symbole, ["VOLV-B.ST", "NOVO-B.CO", "NOKIA.HE"])
+
+    def test_ausschluss_und_override_greifen_ueber_das_symbol(self):
+        cons = parse_ishares_csv(self.US_CSV, "US")
+        self.assertEqual(apply_overrides(list(cons), {"BRK-B": "BRK-B.US"})[1].symbol, "BRK-B.US")
+
+
+class TestStooqOhneKey(unittest.TestCase):
+    def test_ohne_key_wird_trotzdem_abgefragt(self):
+        """Der frühere harter Abbruch ohne STOOQ_APIKEY machte den Fallback wirkungslos."""
+        csv_text = "Date,Open,High,Low,Close,Volume\n2026-09-04,10,11,9,10.5,1000\n"
+        antwort = mock.Mock(status_code=200, text=csv_text)
+        with mock.patch("requests.get", return_value=antwort) as get, \
+             mock.patch("satellit.data.time.sleep"):
+            res = StooqSource(apikey="").fetch(["AAPL"], date(2026, 9, 1), date(2026, 9, 4))
+        self.assertEqual(get.call_count, 1)
+        self.assertNotIn("apikey", get.call_args[0][0])
+        self.assertIn("AAPL", res.frames)
 
 
 if __name__ == "__main__":

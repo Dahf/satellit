@@ -8,6 +8,7 @@ const ALLOWED: Record<string, string> = {
   "journal.stop": "/journal/stop",
   account: "/account",
   "run.weekly": "/run/weekly",
+  "universe.import": "/universe/import",
 };
 
 export async function POST(req: NextRequest) {

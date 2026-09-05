@@ -22,7 +22,7 @@ from .fx import FxTable, load_fx
 from .notify import send_pushover
 from .pipeline import last_friday, run_weekly
 from .report import build_push, write_report
-from .universe import load_universe, save_universe_snapshot
+from .universe import import_holdings, load_universe, snapshot_aktualisieren
 
 log = logging.getLogger("satellit")
 
@@ -59,13 +59,37 @@ def cmd_weekly(a, s: Settings) -> int:
     return 0
 
 
+def _universe_import(a, s: Settings) -> int:
+    """Von Hand heruntergeladene iShares-Holdings-CSV übernehmen."""
+    pfad = Path(a.import_file)
+    if not pfad.exists():
+        print(f"Datei nicht gefunden: {pfad}")
+        return 1
+    if not a.region:
+        print("--region fehlt (z. B. --region US)")
+        return 1
+    try:
+        anzahl, ziel = import_holdings(s, a.region, pfad.read_text(encoding="utf-8", errors="replace"))
+    except ValueError as exc:
+        print(f"Import fehlgeschlagen: {exc}")
+        return 1
+    print(f"{a.region}: {anzahl} Titel gelesen -> {ziel}")
+    return 0
+
+
 def cmd_universe(a, s: Settings) -> int:
-    cons, warnings = load_universe(s, force=a.force)
-    save_universe_snapshot(cons, s.universe_dir / "universe_snapshot.csv")
+    if getattr(a, "import_file", None):
+        return _universe_import(a, s)
+    cons, warnings, status = load_universe(s, force=a.force)
+    snapshot_aktualisieren(cons, status, s.universe_dir / "universe_snapshot.csv")
     by_region: dict[str, int] = {}
     for c in cons:
         by_region[c.region] = by_region.get(c.region, 0) + 1
-    print("Universum:", ", ".join(f"{k} {v}" for k, v in by_region.items()))
+    print("Universum:", ", ".join(f"{k} {v}" for k, v in by_region.items()) or "(leer)")
+    for region, st in status.items():
+        herkunft = st["quelle"] or "keine Quelle"
+        alter = "" if st["alter_tage"] in (None, 0) else f", {st['alter_tage']} Tage alt"
+        print(f"  {region}: {'ok' if st['ok'] else 'FEHLT'} — {herkunft}{alter}")
     for w in warnings:
         print("⚠️", w)
     if a.check:
@@ -83,7 +107,7 @@ def cmd_prices(a, s: Settings) -> int:
     if a.symbols:
         symbols, scales = [x.strip() for x in a.symbols.split(",")], {}
     else:
-        cons, _ = load_universe(s)
+        cons, _, _ = load_universe(s)
         symbols, scales = [c.symbol for c in cons], {c.symbol: c.price_scale for c in cons}
     source = build_source(s, a.source) if a.source else None
     frames, failed, notes = update_prices(s, symbols, scales, source=source)
@@ -252,9 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--no-push", action="store_true")
     w.set_defaults(func=cmd_weekly)
 
-    u = sub.add_parser("universe", help="Konstituenten laden/prüfen")
+    u = sub.add_parser("universe", help="Konstituenten laden/prüfen/importieren")
     u.add_argument("--force", action="store_true")
     u.add_argument("--check", action="store_true")
+    u.add_argument("--import-file", dest="import_file", default=None,
+                   help="Von Hand heruntergeladene iShares-Holdings-CSV übernehmen (mit --region)")
+    u.add_argument("--region", default=None, help="Region für --import-file, z. B. US oder EU")
     u.set_defaults(func=cmd_universe)
 
     pr = sub.add_parser("prices", help="Kurs-Cache aktualisieren")

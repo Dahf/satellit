@@ -1,6 +1,10 @@
-# Manuelle Korrekturen der Ticker-Zuordnung (ISIN -> Yahoo-Symbol).
+# Manuelle Korrekturen der Ticker-Zuordnung -> Yahoo-Symbol.
 # Der Bericht listet Symbole, für die keine Kurse geladen werden konnten;
 # hier die richtige Schreibweise eintragen.
+#
+# Schlüssel darf ISIN, das abgeleitete Yahoo-Symbol oder der rohe Ticker sein. Da die
+# iShares-Dateien seit 09/2026 keine ISIN-Spalte mehr enthalten, ist das Symbol der
+# verlässliche Schlüssel.
 overrides: {}
-#  GB0007980591: "BP.L"
-#  SE0000108656: "ERIC-B.ST"
+#  "BP.L": "BP.L"
+#  "ERIC-B.ST": "ERIC-B.ST"

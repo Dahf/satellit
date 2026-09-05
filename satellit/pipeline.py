@@ -6,6 +6,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from .config import Settings
 from .data import PriceSource, SyntheticSource, build_source, update_prices
 from .fx import FxTable, load_fx
 from .screener import ScreenerContext, run_screener
-from .universe import Constituent, load_universe, save_universe_snapshot
+from .universe import Constituent, load_universe, snapshot_aktualisieren
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class WeeklyResult:
     open_risk_pct: float | None
     universe_size: dict[str, int]
     universe_warnings: list[str]
+    universum_status: dict[str, dict]     # je Region: quelle, alter_tage, anzahl, ok
     data_failed: dict[str, str]
     data_notes: list[str]
     fx_note: str
@@ -240,7 +242,8 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
 # ---------------------------------------------------------------------- main run
 def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSource | None = None,
                fallback: PriceSource | None = None, demo: bool = False, skip_us_scripts: bool = False,
-               us_scores: tuple[float | None, float | None] | None = None) -> WeeklyResult:
+               us_scores: tuple[float | None, float | None] | None = None,
+               progress: Callable[[int, int], None] | None = None) -> WeeklyResult:
     settings.ensure_dirs()
     today = date.today()
     as_of = as_of or last_friday(today)
@@ -249,19 +252,25 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
     # 1. Universum
     if demo:
         cons, uni_warn = demo_universe(), ["DEMO-Modus: synthetisches Universum und synthetische Kurse"]
+        uni_status = {c.region: {"quelle": "demo", "alter_tage": 0, "anzahl": 0, "ok": True} for c in cons}
         source = source or SyntheticSource(days=int(settings.get("data.history_days", 420)))
     else:
-        cons, uni_warn = load_universe(settings)
+        cons, uni_warn, uni_status = load_universe(settings)
         source = source or build_source(settings)
         if fallback is None and settings.get("data.fallback") and settings.get("data.fallback") != settings.get("data.primary"):
             try:
                 fallback = build_source(settings, settings.get("data.fallback"))
             except ValueError:
                 fallback = None
-    save_universe_snapshot(cons, settings.universe_dir / "universe_snapshot.csv")
+    if not demo:
+        snapshot_aktualisieren(cons, uni_status, settings.universe_dir / "universe_snapshot.csv")
     universe_size = {}
     for c in cons:
         universe_size[c.region] = universe_size.get(c.region, 0) + 1
+    # anzahl auf den Stand nach der Dublettenbereinigung bringen — das ist die Zahl, mit der
+    # anschließend wirklich gerechnet wird.
+    for region, n in universe_size.items():
+        uni_status.setdefault(region, {"quelle": None, "alter_tage": None, "ok": True})["anzahl"] = n
 
     # 2. Kurse (Konstituenten + offene Positionen + Index-Proxys)
     symbols = [c.symbol for c in cons]
@@ -278,7 +287,8 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
             if cfg["index_symbol"] not in scales:
                 symbols.append(cfg["index_symbol"])
                 scales[cfg["index_symbol"]] = 1.0
-    frames, failed, notes = update_prices(settings, symbols, scales, source=source, fallback=fallback, today=today)
+    frames, failed, notes = update_prices(settings, symbols, scales, source=source, fallback=fallback,
+                                          today=today, progress=progress)
     currencies = {c.currency for c in cons}
     fx = FxTable({}, "demo") if demo else load_fx(source, currencies, today)
 
@@ -344,6 +354,7 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
         as_of=as_of, readings=readings, account=account, kill_active=blocked, kill_reason=account.kill_switch_reason,
         dry_run=dry_run, risk_pct_by_region=risk_by_region, table=table, proposals=proposals, skipped=skipped,
         positions=positions, open_risk_pct=open_risk_pct, universe_size=universe_size, universe_warnings=uni_warn,
+        universum_status=uni_status,
         data_failed=failed, data_notes=notes, fx_note=fx.note, regime_notes=regime_notes, digest_md=digest_md,
         demo=demo,
     )

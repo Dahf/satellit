@@ -11,6 +11,7 @@ import csv
 import io
 import logging
 import re
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -53,6 +54,9 @@ EXCHANGE_SUFFIX = [
     ("athens", ".AT"), ("prague", ".PR"), ("toronto", ".TO"),
     ("nasdaq", ""), ("new york", ""), ("nyse", ""), ("cboe", ""), ("bats", ""),
 ]
+
+# "Nasdaq Omx Nordic" nennt die Börse nicht — die Handelswährung entscheidet.
+NORDIC_BY_CURRENCY = {"SEK": ".ST", "DKK": ".CO", "NOK": ".OL", "EUR": ".HE", "ISK": ".IC"}
 
 
 @dataclass
@@ -103,6 +107,14 @@ def _normalise_header(cells: list[str]) -> dict[str, int]:
     return mapping
 
 
+def _cell(row: list[str], cols: dict[str, int], key: str, default: str = "") -> str:
+    """Feld aus einer CSV-Zeile. Fehlende Spalte oder zu kurze Zeile -> default."""
+    idx = cols.get(key)
+    if idx is None or idx >= len(row):
+        return default
+    return row[idx].strip()
+
+
 def parse_ishares_csv(text: str, region: str) -> list[Constituent]:
     """iShares-Holdings-CSV (deutsche oder englische Seite) -> Konstituenten (nur Aktien)."""
     lines = text.splitlines()
@@ -124,24 +136,23 @@ def parse_ishares_csv(text: str, region: str) -> list[Constituent]:
 
     out: list[Constituent] = []
     for row in reader:
-        if not row or len(row) <= cols["ticker"]:
+        # Kurze Zeilen überspringen: iShares hängt eine Fußzeile aus einem einzelnen
+        # geschützten Leerzeichen an, und einzelne Datenzeilen sind gelegentlich gekürzt.
+        if not row or len(row) < 2:
             continue
-        asset_class = row[cols["asset_class"]].strip().lower()
-        if asset_class not in EQUITY_CLASSES:
+        if _cell(row, cols, "asset_class").lower() not in EQUITY_CLASSES:
             continue
-        ticker = row[cols["ticker"]].strip()
+        ticker = _cell(row, cols, "ticker")
         if not ticker or ticker == "-":
             continue
-        isin = row[cols["isin"]].strip() if "isin" in cols else ""
-        exchange = row[cols["exchange"]].strip() if "exchange" in cols else ""
-        currency = row[cols["currency"]].strip().upper() if "currency" in cols else ""
-        weight = parse_number(row[cols["weight"]]) if "weight" in cols else float("nan")
-        sector = row[cols["sector"]].strip() if "sector" in cols else "Unknown"
+        exchange = _cell(row, cols, "exchange")
+        currency = _cell(row, cols, "currency").upper()
         symbol, scale = to_yahoo_symbol(ticker, exchange, currency, region)
         out.append(Constituent(
-            region=region, isin=isin, ticker=ticker, name=row[cols["name"]].strip(),
-            sector=sector or "Unknown", exchange=exchange, currency=currency,
-            weight=weight, symbol=symbol, price_scale=scale,
+            region=region, isin=_cell(row, cols, "isin"), ticker=ticker,
+            name=_cell(row, cols, "name"), sector=_cell(row, cols, "sector") or "Unknown",
+            exchange=exchange, currency=currency,
+            weight=parse_number(_cell(row, cols, "weight")), symbol=symbol, price_scale=scale,
         ))
     if not out:
         raise ValueError("iShares-CSV enthält keine Aktienpositionen")
@@ -149,8 +160,14 @@ def parse_ishares_csv(text: str, region: str) -> list[Constituent]:
 
 
 # --------------------------------------------------------------------------- mapping
-def exchange_suffix(exchange: str, region: str) -> str | None:
+def exchange_suffix(exchange: str, region: str, currency: str = "") -> str | None:
     ex = (exchange or "").lower()
+    # "Nasdaq Omx Nordic" fasst Stockholm, Helsinki, Kopenhagen und Oslo unter einem Namen
+    # zusammen; erst die Handelswährung sagt, welche Börse gemeint ist. Muss vor der
+    # generischen nasdaq-Regel stehen — sonst landen die nordischen Titel als US-Symbole
+    # im Universum und schlagen beim Kursabruf fehl.
+    if "omx" in ex or "nordic" in ex:
+        return NORDIC_BY_CURRENCY.get((currency or "").upper())
     for needle, suffix in EXCHANGE_SUFFIX:
         if needle in ex:
             return suffix
@@ -171,7 +188,7 @@ def normalise_ticker(ticker: str, suffix: str) -> str:
 
 
 def to_yahoo_symbol(ticker: str, exchange: str, currency: str, region: str) -> tuple[str, float]:
-    suffix = exchange_suffix(exchange, region)
+    suffix = exchange_suffix(exchange, region, currency)
     if suffix is None:
         suffix = ""  # unbekannte Börse: Ticker roh übernehmen, Bericht zeigt Ladefehler
     base = normalise_ticker(ticker, suffix)
@@ -181,20 +198,38 @@ def to_yahoo_symbol(ticker: str, exchange: str, currency: str, region: str) -> t
 
 
 def apply_overrides(constituents: Iterable[Constituent], overrides: dict[str, str]) -> list[Constituent]:
+    """Schlüssel darf ISIN, Yahoo-Symbol oder Ticker sein.
+
+    Die iShares-Dateien liefern seit 09/2026 keine ISIN-Spalte mehr; ein rein ISIN-basierter
+    Schlüssel würde also stillschweigend nie greifen.
+    """
     out = []
     for c in constituents:
-        if c.isin and c.isin in overrides:
-            c.symbol = overrides[c.isin]
+        neu = overrides.get(c.isin) if c.isin else None
+        if not neu:
+            neu = overrides.get(c.symbol) or overrides.get(c.ticker)
+        if neu:
+            c.symbol = neu
         out.append(c)
     return out
 
 
 # --------------------------------------------------------------------------- loading
-def _download(url: str, timeout: int = 60) -> str:
-    headers = {"User-Agent": "Mozilla/5.0 (satellit-pipeline; private use)"}
-    r = requests.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    content = r.content
+# Der iShares-CDN weist Anfragen mit knappen Headern ab, besonders aus Rechenzentren.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"),
+    "Accept": "text/csv,text/plain,application/octet-stream,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+RETRY_PAUSEN = (5, 15)   # Sekunden vor dem 2. und 3. Versuch
+
+
+def _decode(content: bytes) -> str:
     # iShares liefert teils UTF-8 mit BOM, teils latin-1
     for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:
@@ -204,67 +239,184 @@ def _download(url: str, timeout: int = 60) -> str:
     return content.decode("utf-8", errors="replace")
 
 
-def load_universe(settings: Settings, force: bool = False) -> tuple[list[Constituent], list[str]]:
-    """Konstituenten aller Regionen laden. Gibt (Liste, Warnungen) zurück.
+def _alter_tage(path: Path) -> int:
+    return max(0, (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).days)
 
-    Reihenfolge je Region: frische Cache-Datei -> Download -> alte Cache-Datei -> local_file.
+
+def _download(url: str, referer: str | None = None, timeout: int = 60) -> str:
+    """Holdings-CSV holen. Wirft mit einer Meldung, aus der man den Grund ablesen kann.
+
+    Der Referer-Aufruf holt vorher die Produktseite und setzt damit die Cookies, die der
+    CDN erwartet — das ist der häufigste Grund für ein 403 auf den Download-Link.
+    """
+    session = requests.Session()
+    session.headers.update(BROWSER_HEADERS)
+    if referer:
+        session.headers["Referer"] = referer
+        try:
+            session.get(referer, timeout=timeout)
+        except requests.RequestException as exc:      # unkritisch: nur die Cookies fehlen dann
+            log.debug("Referer-Aufruf fehlgeschlagen (%s): %s", referer, exc)
+
+    letzter = "kein Versuch ausgeführt"
+    for versuch in range(len(RETRY_PAUSEN) + 1):
+        if versuch:
+            time.sleep(RETRY_PAUSEN[versuch - 1])
+        try:
+            r = session.get(url, timeout=timeout)
+        except requests.RequestException as exc:
+            letzter = f"Netzwerkfehler: {exc}"
+            continue
+        ctype = r.headers.get("Content-Type", "?")
+        if r.status_code != 200:
+            letzter = f"HTTP {r.status_code}, Content-Type {ctype}, Anfang: {r.text[:120]!r}"
+            continue
+        text = _decode(r.content)
+        if "<html" in text[:400].lower():
+            letzter = f"HTML statt CSV, Content-Type {ctype}, Anfang: {text[:120]!r}"
+            continue
+        return text
+    raise RuntimeError(letzter)
+
+
+def _quellen(cfg: dict) -> list[dict]:
+    """Quellen einer Region. Erlaubt beides: eine einzelne ishares_url oder eine Liste quellen."""
+    roh = cfg.get("quellen")
+    if isinstance(roh, list) and roh:
+        return [q for q in roh if isinstance(q, dict) and q.get("url")]
+    url = cfg.get("ishares_url")
+    return [{"url": url, "referer": cfg.get("referer")}] if url else []
+
+
+def load_snapshot(path: Path, region: str) -> list[Constituent]:
+    """Konstituenten aus dem Snapshot des letzten erfolgreichen Laufs — die letzte Rettung."""
+    if not path.exists():
+        return []
+    out: list[Constituent] = []
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if (row.get("region") or "") != region or not row.get("symbol"):
+                    continue
+                out.append(Constituent(
+                    region=region, isin=row.get("isin", ""), ticker=row.get("ticker", ""),
+                    name=row.get("name", ""), sector=row.get("sector") or "Unknown",
+                    exchange=row.get("exchange", ""), currency=(row.get("currency") or "").upper(),
+                    weight=parse_number(row.get("weight", "")), symbol=row["symbol"],
+                    price_scale=parse_number(row.get("price_scale", "")) or 1.0,
+                ))
+    except (OSError, csv.Error) as exc:
+        log.warning("Snapshot %s nicht lesbar: %s", path, exc)
+        return []
+    return out
+
+
+def import_holdings(settings: Settings, region: str, text: str) -> tuple[int, Path]:
+    """Manuell heruntergeladene Holdings-CSV übernehmen. Validiert vor dem Schreiben."""
+    regionen = settings.get("universe.regions", {}) or {}
+    if region not in regionen:
+        raise ValueError(f"Unbekannte Region {region!r} — bekannt: {', '.join(regionen) or '(keine)'}")
+    cons = parse_ishares_csv(text, region)          # wirft, wenn die Datei nicht passt
+    settings.ensure_dirs()
+    ziel = settings.universe_dir / f"{region}_holdings.csv"
+    ziel.write_text(text, encoding="utf-8")
+    return len(cons), ziel
+
+
+def load_universe(settings: Settings, force: bool = False) -> tuple[list[Constituent], list[str], dict[str, dict]]:
+    """Konstituenten aller Regionen laden.
+
+    Reihenfolge je Region: frischer Cache -> Quellen der Reihe nach -> alter Cache
+    -> local_file -> Snapshot des letzten erfolgreichen Laufs.
+
+    Gibt (Konstituenten, Warnungen, Status je Region) zurück. Der Status hält fest, woher
+    die Daten kamen und wie alt sie sind — ohne ihn bleibt ein Ausfall unsichtbar und die
+    Pipeline rechnet stillschweigend auf einem leeren Universum weiter.
     """
     settings.ensure_dirs()
     warnings: list[str] = []
+    status: dict[str, dict] = {}
     overrides = (settings.load_yaml("symbol_overrides_file", {}) or {}).get("overrides", {}) or {}
     exclusions = settings.load_yaml("exclusions_file", {}) or {}
-    excluded = {}
+    excluded_isin: dict[str, str] = {}
+    excluded_symbol: dict[str, str] = {}
     for group in ("core_holdings", "not_tradable", "manual"):
         for item in exclusions.get(group) or []:
-            if isinstance(item, dict) and item.get("isin"):
-                excluded[item["isin"]] = f"{group}: {item.get('note', '')}".strip()
+            if not isinstance(item, dict):
+                continue
+            grund = f"{group}: {item.get('note', '')}".strip()
+            if item.get("isin"):
+                excluded_isin[str(item["isin"]).strip()] = grund
+            if item.get("symbol"):
+                excluded_symbol[str(item["symbol"]).strip().upper()] = grund
     refresh_days = int(settings.get("universe.refresh_days", 30))
+    snapshot_pfad = settings.universe_dir / "universe_snapshot.csv"
 
     all_cons: list[Constituent] = []
     for region, cfg in settings.get("universe.regions", {}).items():
         cache_file = settings.universe_dir / f"{region}_holdings.csv"
         text: str | None = None
+        quelle: str | None = None
+        alter: int | None = None
+
         fresh = cache_file.exists() and (
             datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime) < timedelta(days=refresh_days)
         )
         if fresh and not force:
-            text = cache_file.read_text(encoding="utf-8")
+            text, quelle, alter = cache_file.read_text(encoding="utf-8"), "cache", _alter_tage(cache_file)
         else:
-            url = cfg.get("ishares_url")
-            if url:
+            for q in _quellen(cfg):
                 try:
-                    text = _download(url)
-                    parse_ishares_csv(text, region)          # validieren, bevor der Cache überschrieben wird
-                    cache_file.write_text(text, encoding="utf-8")
+                    kandidat = _download(q["url"], q.get("referer"))
+                    parse_ishares_csv(kandidat, region)      # validieren, bevor der Cache überschrieben wird
+                    cache_file.write_text(kandidat, encoding="utf-8")
+                    text, quelle, alter = kandidat, "download", 0
+                    break
                 except Exception as exc:  # noqa: BLE001
-                    warnings.append(f"{region}: Download der iShares-Holdings fehlgeschlagen ({exc}); nutze Cache/local_file")
-                    text = None
+                    warnings.append(f"{region}: Download fehlgeschlagen ({exc})")
             if text is None and cache_file.exists():
-                text = cache_file.read_text(encoding="utf-8")
-                age = (datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)).days
-                warnings.append(f"{region}: Konstituenten aus Cache, {age} Tage alt")
+                text, quelle, alter = cache_file.read_text(encoding="utf-8"), "cache", _alter_tage(cache_file)
+                warnings.append(f"{region}: Konstituenten aus Cache, {alter} Tage alt")
             if text is None and cfg.get("local_file"):
                 lf = settings._resolve(cfg["local_file"])
                 if lf.exists():
-                    text = lf.read_text(encoding="utf-8", errors="replace")
+                    text, quelle, alter = lf.read_text(encoding="utf-8", errors="replace"), "local_file", _alter_tage(lf)
                     warnings.append(f"{region}: Konstituenten aus local_file {lf.name}")
-        if text is None:
+
+        cons: list[Constituent] | None = None
+        if text is not None:
+            try:
+                cons = parse_ishares_csv(text, region)
+            except ValueError as exc:
+                warnings.append(f"{region}: iShares-CSV nicht lesbar ({exc})")
+                cons = None
+        if not cons:
+            cons = load_snapshot(snapshot_pfad, region)
+            if cons:
+                quelle, alter = "snapshot", _alter_tage(snapshot_pfad)
+                warnings.append(f"{region}: Konstituenten aus dem letzten erfolgreichen Lauf ({alter} Tage alt)")
+        if not cons:
             warnings.append(f"{region}: KEINE Konstituenten verfügbar — Region wird übersprungen")
+            status[region] = {"quelle": None, "alter_tage": None, "anzahl": 0, "ok": False}
             continue
-        try:
-            cons = parse_ishares_csv(text, region)
-        except ValueError as exc:
-            warnings.append(f"{region}: iShares-CSV nicht lesbar ({exc}) — Region wird übersprungen")
-            continue
+
         cons = apply_overrides(cons, overrides)
+        if excluded_isin and not any(c.isin for c in cons):
+            warnings.append(
+                f"{region}: Datei enthält keine ISIN-Spalte — {len(excluded_isin)} ISIN-Ausschlüsse "
+                "greifen hier nicht. Stattdessen 'symbol:' in exclusions.yaml eintragen."
+            )
         kept = []
         for c in cons:
-            if c.isin in excluded:
-                log.info("Ausschluss %s %s (%s)", c.symbol, c.name, excluded[c.isin])
+            grund = excluded_isin.get(c.isin) if c.isin else None
+            grund = grund or excluded_symbol.get(c.symbol.upper()) or excluded_symbol.get(c.ticker.upper())
+            if grund:
+                log.info("Ausschluss %s %s (%s)", c.symbol, c.name, grund)
                 continue
             kept.append(c)
         all_cons.extend(kept)
-        log.info("%s: %d Konstituenten (%d ausgeschlossen)", region, len(kept), len(cons) - len(kept))
+        status[region] = {"quelle": quelle, "alter_tage": alter, "anzahl": len(kept), "ok": True}
+        log.info("%s: %d Konstituenten aus %s (%d ausgeschlossen)", region, len(kept), quelle, len(cons) - len(kept))
 
     # Doppelte Symbole (z. B. Dual Listings) entfernen — erstes Vorkommen gewinnt
     seen: set[str] = set()
@@ -274,7 +426,7 @@ def load_universe(settings: Settings, force: bool = False) -> tuple[list[Constit
             continue
         seen.add(c.symbol)
         unique.append(c)
-    return unique, warnings
+    return unique, warnings, status
 
 
 def save_universe_snapshot(constituents: list[Constituent], path: Path) -> None:
@@ -284,3 +436,17 @@ def save_universe_snapshot(constituents: list[Constituent], path: Path) -> None:
         writer.writeheader()
         for c in constituents:
             writer.writerow(c.to_dict())
+
+
+def snapshot_aktualisieren(constituents: list[Constituent], status: dict[str, dict], path: Path) -> bool:
+    """Snapshot nur schreiben, wenn mindestens eine Region aus einer echten Quelle kam.
+
+    Kam alles aus dem Snapshot selbst, würde das Neuschreiben nur seine mtime zurücksetzen —
+    und damit sein Alter verschleiern, also genau die Information vernichten, für die er da ist.
+    """
+    if not constituents:
+        return False
+    if all((s.get("quelle") in (None, "snapshot")) for s in status.values()):
+        return False
+    save_universe_snapshot(constituents, path)
+    return True
