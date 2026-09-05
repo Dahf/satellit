@@ -9,6 +9,7 @@ services:
   satellit:
     build: .
     image: satellit:latest
+    pull_policy: build   # lokal bauen, nicht von Docker Hub ziehen
     container_name: satellit
     restart: unless-stopped
     environment:
@@ -33,6 +34,7 @@ services:
   dashboard:
     build: ./dashboard
     image: satellit-dashboard:latest
+    pull_policy: build   # lokal bauen, nicht von Docker Hub ziehen
     container_name: satellit-dashboard
     restart: unless-stopped
     environment:
