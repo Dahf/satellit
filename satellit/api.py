@@ -10,6 +10,7 @@ import glob
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
@@ -244,10 +245,21 @@ def action_portfolio_setup(settings: Settings, body: dict) -> dict:
     plan = portfolio.lade_plan(settings)
     if plan.onboarding_erledigt and not body.get("force"):
         raise ValueError("Das Portfolio ist bereits eingerichtet.")
+    eingabe = str(body.get("etf_isin") or "").strip().upper()
     katalog = {e["isin"]: e for e in portfolio.lade_etf_katalog(settings)}
-    etf = katalog.get(str(body.get("etf_isin") or ""))
-    if etf is None:
-        raise ValueError("Unbekannte ETF-ISIN — bitte aus der Liste wählen.")
+    if katalog:
+        etf = katalog.get(eingabe)
+        if etf is None:
+            raise ValueError("Unbekannte ETF-ISIN — bitte aus der Liste wählen.")
+    else:
+        # Ohne Katalog (config/etf_universe.yaml fehlt) darf die Einrichtung nicht scheitern.
+        # Streng prüfen, wo geprüft werden kann; sonst die Eingabe übernehmen und den
+        # fehlenden Kurs-Symbolnamen ehrlich offen lassen — die Bewertung fällt dann auf
+        # den Einstand zurück und meldet das.
+        if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", eingabe):
+            raise ValueError("Das sieht nicht nach einer ISIN aus (12 Zeichen, z. B. IE00BK5BQT80).")
+        etf = {"isin": eingabe, "symbol": str(body.get("etf_symbol") or ""),
+               "name": str(body.get("etf_name") or eingabe)}
     anteil = float(body.get("etf_anteil", 0.8))
     if anteil < 0.8:
         raise ValueError("Mindestens 80 % des Kerns gehören in den ETF (KERN.md 1).")
@@ -287,9 +299,11 @@ def action_portfolio_import(settings: Settings, body: dict) -> dict:
         raise ValueError("Kein Dateiinhalt übermittelt")
     if len(inhalt.encode("utf-8")) > MAX_IMPORT_BYTES:
         raise ValueError(f"Datei zu groß (Grenze {MAX_IMPORT_BYTES // 1024 // 1024} MB)")
+    optionen = {"mit_geldbewegungen": bool(body.get("mit_geldbewegungen")),
+                "ab": str(body["ab"]) if body.get("ab") else None}
     if body.get("uebernehmen"):
-        return tr_import.uebernehmen(settings, inhalt)
-    return tr_import.vorschau(settings, inhalt)
+        return tr_import.uebernehmen(settings, inhalt, **optionen)
+    return tr_import.vorschau(settings, inhalt, **optionen)
 
 
 ACTIONS = {

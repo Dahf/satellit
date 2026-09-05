@@ -114,6 +114,30 @@ export function Onboarding({ etfs }: { etfs: EtfEintrag[] }) {
       </Schritt>
 
       <Schritt nummer="3" titel="Welchen Welt-ETF?">
+        {welt.length === 0 && (
+          <div className="mb-4 rounded-md bg-achtung-weich px-3 py-2.5 text-etikett leading-relaxed text-achtung">
+            Die Auswahlliste konnte nicht geladen werden — <code className="font-mono">config/etf_universe.yaml</code>{" "}
+            fehlt auf dem Server. Trag die ISIN so lange von Hand ein; alles andere funktioniert
+            unverändert.
+          </div>
+        )}
+
+        {welt.length === 0 && (
+          <label className="flex flex-col gap-1">
+            <span className="text-marginalie uppercase tracking-wider text-muted-foreground">ISIN des ETF</span>
+            <input
+              value={isin}
+              onChange={(e) => setIsin(e.target.value.trim().toUpperCase())}
+              placeholder="IE00BK5BQT80"
+              className="zahl w-56 rounded-sm border border-input bg-card px-2.5 py-1.5 text-lauftext"
+            />
+            <span className="mt-1 text-etikett text-muted-foreground">
+              IE00BK5BQT80 ist der Vanguard FTSE All-World (thesaurierend) — die Referenzvariante aus
+              deinem Kern-Dokument.
+            </span>
+          </label>
+        )}
+
         <div className="space-y-2">
           {welt.map((e) => (
             <label

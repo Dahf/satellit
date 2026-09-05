@@ -424,18 +424,43 @@ class TestTrImport(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_englisches_format(self):
-        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
+        buchungen, _ = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
         nach_typ = {b.typ for b in buchungen}
-        self.assertIn("einzahlung", nach_typ)
         self.assertIn("sparplan", nach_typ)          # Kauf mit der ETF-ISIN -> Kern
         self.assertIn("satellit_kauf", nach_typ)     # fremde ISIN -> Satellit
         self.assertIn("satellit_verkauf", nach_typ)
         self.assertIn("dividende", nach_typ)
         self.assertIn("steuer", nach_typ)
 
+    def test_geldbewegungen_bleiben_standardmaessig_aussen_vor(self):
+        """Trade Republic ist Bank und Broker. Ein- und Auszahlungen des Verrechnungskontos
+        als Portfolio-Einzahlungen zu buchen macht 'Eingezahlt' und damit den Gewinn wertlos."""
+        ohne, warnungen = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s))
+        self.assertNotIn("einzahlung", {b.typ for b in ohne})
+        self.assertTrue(any("Bank und Broker" in w for w in warnungen), warnungen)
+
+        mit, _ = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s), mit_geldbewegungen=True)
+        self.assertIn("einzahlung", {b.typ for b in mit})
+
+    def test_kartenzahlungen_werden_nie_gebucht(self):
+        """264 von 269 Entnahmen in echten Daten waren Kartenzahlungen — Alltagsausgaben."""
+        csv_text = ("Datum;Typ;Wert;Notiz;ISIN;Stück;Gebühren;Steuern;ISIN2;Stück2\n"
+                    "06.09.2026;Entnahme;-8,88;Kartentransaktion - Bäckerei;;;;;;\n"
+                    "06.09.2026;Entnahme;-500,00;Überweisung an Girokonto;;;;;;\n")
+        buchungen, warnungen = tr_import.parse_tr_csv(csv_text, None, mit_geldbewegungen=True)
+        self.assertEqual(len(buchungen), 1)                       # nur die Überweisung
+        self.assertAlmostEqual(buchungen[0].betrag_eur, 500.0)
+        self.assertTrue(any("Kartenzahlungen" in w for w in warnungen), warnungen)
+
+    def test_startdatum_grenzt_die_vorgeschichte_aus(self):
+        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_EN, pf.lade_plan(self.s), ab="2026-11-01")
+        self.assertTrue(all(b.datum >= "2026-11-01" for b in buchungen), [b.datum for b in buchungen])
+        self.assertTrue(any("Startdatum" in w for w in warnungen), warnungen)
+
     def test_deutsches_format(self):
         """pytr übersetzt Überschriften UND Ereignisnamen — beides muss erkannt werden."""
-        buchungen, warnungen = tr_import.parse_tr_csv(TR_CSV_DE, pf.lade_plan(self.s))
+        buchungen, _ = tr_import.parse_tr_csv(TR_CSV_DE, pf.lade_plan(self.s),
+                                              mit_geldbewegungen=True)
         self.assertEqual([b.typ for b in buchungen], ["einzahlung", "sparplan", "auszahlung"])
         self.assertAlmostEqual(buchungen[0].betrag_eur, 5000.0)     # 5.000,00 deutsch gelesen
         self.assertAlmostEqual(buchungen[1].stueck, 21.4218)
@@ -472,7 +497,7 @@ class TestTrImport(unittest.TestCase):
         v = tr_import.vorschau(self.s, TR_CSV_EN)
         self.assertGreater(v["neu"], 0)
         self.assertEqual(len(pf.lies_ledger(self.s)), 0)
-        self.assertEqual(v["zeitraum"][0], "2026-09-06")
+        self.assertEqual(v["zeitraum"][0], "2026-09-07")     # Einzahlung vom 06. fällt raus
 
     def test_datumsformate(self):
         self.assertEqual(tr_import._datum("06.09.2026"), "2026-09-06")

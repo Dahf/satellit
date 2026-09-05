@@ -90,6 +90,13 @@ NICHT_AUTOMATISCH = {
     "spinoff": "Abspaltung", "split": "Aktiensplit", "swap": "Tausch",
 }
 
+# Trade Republic ist Bank **und** Broker; der Export mischt beides. Ein- und Auszahlungen
+# sind Kontobewegungen, keine Anlageentscheidungen — Kartenzahlungen erst recht. Würden sie
+# als Portfolio-Einzahlungen gebucht, wäre "Eingezahlt" die Summe aus Anlagegeld und
+# Alltagsausgaben, und Gewinn wie Rendite wären wertlos.
+GELDBEWEGUNGEN = {"einzahlung", "auszahlung"}
+KARTENZAHLUNG = "kartentransaktion"
+
 
 def _datum(text: str) -> str | None:
     """TT.MM.JJJJ, JJJJ-MM-TT und ISO-Zeitstempel. Im Repo gab es dafür bisher nichts."""
@@ -112,9 +119,19 @@ def _topf_fuer(isin: str, plan) -> str:
     return "satellit"
 
 
-def parse_tr_csv(text: str, plan=None) -> tuple[list[Buchung], list[str]]:
-    """CSV -> Buchungen + Warnungen. Wirft nur, wenn die Datei gar keine Tabelle ist."""
+def parse_tr_csv(text: str, plan=None, mit_geldbewegungen: bool = False,
+                 ab: str | None = None) -> tuple[list[Buchung], list[str]]:
+    """CSV -> Buchungen + Warnungen. Wirft nur, wenn die Datei gar keine Tabelle ist.
+
+    `mit_geldbewegungen=False` (Standard) überspringt Ein- und Auszahlungen: bei Trade
+    Republic sind das Kontobewegungen des Verrechnungskontos, nicht Anlageentscheidungen.
+    Was ins Portfolio geflossen ist, legst du bei der Einrichtung fest.
+
+    `ab` begrenzt auf Buchungen ab diesem Datum — nützlich, wenn das Depot einen definierten
+    Startzeitpunkt hat und die Vorgeschichte nicht dazugehört.
+    """
     warnungen: list[str] = []
+    uebersprungen = {"karte": 0, "geld": 0, "alt": 0}
     zeilen = text.splitlines()
     if not zeilen:
         raise ValueError("Die Datei ist leer.")
@@ -163,12 +180,24 @@ def parse_tr_csv(text: str, plan=None) -> tuple[list[Buchung], list[str]]:
             warnungen.append(f"Zeile {nr}: Art {zelle(row, 'typ')!r} unbekannt — übersprungen, "
                              f"bitte von Hand buchen.")
             continue
+        if ab and datum < ab:
+            uebersprungen["alt"] += 1
+            continue
+
+        typ, topf = zuordnung
+        notiz = zelle(row, "titel")
+        # Kartenzahlungen sind Alltagsausgaben, nie eine Anlageentscheidung.
+        if notiz.lower().startswith(KARTENZAHLUNG):
+            uebersprungen["karte"] += 1
+            continue
+        if typ in GELDBEWEGUNGEN and not mit_geldbewegungen:
+            uebersprungen["geld"] += 1
+            continue
+
         betrag = parse_number(zelle(row, "wert"))
         if betrag != betrag:
             warnungen.append(f"Zeile {nr}: Betrag {zelle(row, 'wert')!r} nicht lesbar — übersprungen.")
             continue
-
-        typ, topf = zuordnung
         isin = zelle(row, "isin").upper()
         if typ == "kauf":
             typ = "kern_kauf" if _topf_fuer(isin, plan) == "kern_etf" else "satellit_kauf"
@@ -185,10 +214,19 @@ def parse_tr_csv(text: str, plan=None) -> tuple[list[Buchung], list[str]]:
             datum=datum, typ=typ, topf=topf, betrag_eur=abs(betrag), isin=isin,
             stueck=0.0 if stueck != stueck else abs(stueck),
             gebuehr_eur=0.0 if gebuehr != gebuehr else abs(gebuehr),
-            notiz=zelle(row, "titel")[:80], quelle="tr_import",
+            notiz=notiz[:80], quelle="tr_import",
             quelle_id=schluessel(datum, typ, isin, abs(betrag),
                                  0.0 if stueck != stueck else abs(stueck)),
         ))
+    if uebersprungen["karte"]:
+        warnungen.append(f"{uebersprungen['karte']} Kartenzahlungen übersprungen — Alltagsausgaben "
+                         f"vom Verrechnungskonto gehören nicht ins Depot.")
+    if uebersprungen["geld"]:
+        warnungen.append(f"{uebersprungen['geld']} Ein-/Auszahlungen übersprungen. Trade Republic ist "
+                         f"Bank und Broker zugleich; was davon Anlagegeld ist, legst du bei der "
+                         f"Einrichtung fest.")
+    if uebersprungen["alt"]:
+        warnungen.append(f"{uebersprungen['alt']} Buchungen vor dem Startdatum übersprungen.")
     if not out and not warnungen:
         warnungen.append("Die Datei enthielt keine verwertbaren Zeilen.")
     return out, warnungen
@@ -210,12 +248,27 @@ def _neue(settings: Settings, buchungen: list[Buchung]) -> tuple[list[Buchung], 
     return neu, len(buchungen) - len(neu)
 
 
-def vorschau(settings: Settings, text: str) -> dict:
+def _startdatum(settings: Settings, ab: str | None) -> str | None:
+    """Ohne ausdrückliches Datum ab dem Depotstart importieren.
+
+    Der TR-Export enthält die vollständige Kontohistorie — bei einem Konto, das vorher als
+    Giro- und Handelskonto lief, sind das Jahre, die mit diesem Depot nichts zu tun haben.
+    Sie würden ein Cash-Guthaben erzeugen, das es im Portfolio nie gab.
+    """
+    if ab:
+        return ab
+    plan = lade_plan(settings)
+    return plan.start_datum or None
+
+
+def vorschau(settings: Settings, text: str, mit_geldbewegungen: bool = False,
+             ab: str | None = None) -> dict:
     """Was gebucht würde — ohne etwas zu schreiben.
 
     Bei einem undokumentierten Fremdformat ist ein stiller Direktimport nicht vertretbar.
     """
-    buchungen, warnungen = parse_tr_csv(text, lade_plan(settings))
+    buchungen, warnungen = parse_tr_csv(text, lade_plan(settings), mit_geldbewegungen,
+                                        _startdatum(settings, ab))
     neu, doppelt = _neue(settings, buchungen)
     nach_typ: dict[str, int] = {}
     for b in neu:
@@ -229,8 +282,10 @@ def vorschau(settings: Settings, text: str) -> dict:
     }
 
 
-def uebernehmen(settings: Settings, text: str) -> dict:
-    buchungen, warnungen = parse_tr_csv(text, lade_plan(settings))
+def uebernehmen(settings: Settings, text: str, mit_geldbewegungen: bool = False,
+                ab: str | None = None) -> dict:
+    buchungen, warnungen = parse_tr_csv(text, lade_plan(settings), mit_geldbewegungen,
+                                        _startdatum(settings, ab))
     neu, doppelt = _neue(settings, buchungen)
     geschrieben = schreibe_buchungen(settings, neu)
     log.info("TR-Import: %d neu, %d bereits vorhanden, %d Warnungen", geschrieben, doppelt, len(warnungen))

@@ -148,7 +148,7 @@ def cmd_tr_import(a, s: Settings) -> int:
         return 1
     text = pfad.read_text(encoding="utf-8", errors="replace")
     try:
-        v = tr_import.vorschau(s, text)
+        v = tr_import.vorschau(s, text, a.mit_geld, a.ab)
     except ValueError as exc:
         print(f"Nicht lesbar: {exc}")
         return 1
@@ -164,7 +164,7 @@ def cmd_tr_import(a, s: Settings) -> int:
         return 0
     if not v["neu"]:
         return 0
-    r = tr_import.uebernehmen(s, text)
+    r = tr_import.uebernehmen(s, text, a.mit_geld, a.ab)
     print(f"\n{r['gebucht']} Buchungen übernommen.")
     return 0
 
@@ -418,6 +418,10 @@ def build_parser() -> argparse.ArgumentParser:
     tr = sub.add_parser("tr-import", help="Umsatzliste aus Trade Republic übernehmen (pytr-CSV)")
     tr.add_argument("datei")
     tr.add_argument("--vorschau", action="store_true", help="nur zeigen, nichts buchen")
+    tr.add_argument("--mit-geld", dest="mit_geld", action="store_true",
+                    help="Ein- und Auszahlungen mitbuchen (Standard: aus, das Verrechnungskonto "
+                         "ist kein Depot)")
+    tr.add_argument("--ab", default=None, help="nur Buchungen ab diesem Datum (JJJJ-MM-TT)")
     tr.set_defaults(func=cmd_tr_import)
 
     lg = sub.add_parser("ledger", help="Kassenbuch anzeigen/ergänzen")

@@ -9,3 +9,10 @@ state/*.csv
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Kontoauszüge und Broker-Exporte — echte Finanzdaten, gehören nie ins Repository.
+account_transactions.csv
+all_events.json
+events_with_documents.json
+other_events.json
+*_transactions.csv
