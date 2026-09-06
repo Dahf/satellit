@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Callable
@@ -13,7 +12,7 @@ import pandas as pd
 
 from . import decisions as dec
 from . import indicators as ind
-from . import journal, portfolio, regime
+from . import journal, portfolio, regime, sizing
 from .config import Settings, risikoprofil
 from .decisions import Decision, Kontext, SkipInfo
 from .data import (
@@ -341,14 +340,12 @@ def mindestkapital(settings: Settings, table: pd.DataFrame, fx: FxTable, risk_pc
     Depot ist schlicht zu klein — steht nirgends. Geraten wird nichts: gerechnet wird gegen
     die tatsächlichen Kurse und Stopabstände des Universums.
 
-    Zur Drei im Ganzstück-Fall: der Preisfilter verlangt Kurs <= 40 % der Zielposition. Bei
-    einem Stück wäre die Zielposition genau ein Kurs, die Bedingung also nie erfüllbar; erst
-    ab drei Stück geht die Ungleichung auf.
+    Die Umkehrung je Titel steht in `sizing.mindestkapital_je_titel`, neben den Grenzen, die
+    sie invertiert. Hier bleibt nur die Auswahl: welche Titel überhaupt gefragt werden.
     """
     if table.empty or risk_pct <= 0:
         return None
     profil = risikoprofil(settings, equity_eur)
-    max_pct = profil["max_position_pct"]
     # Titel, die nur noch an der Größe scheitern könnten — Trend, RS, Liquidität, Volatilität
     # sind Eigenschaften des Titels und ändern sich nicht dadurch, dass mehr Geld da ist.
     brauchbar = table[table["trend_ok"] & table["rs_top"] & table["liquidity_ok"] & table["vol_ok"]]
@@ -360,13 +357,9 @@ def mindestkapital(settings: Settings, table: pd.DataFrame, fx: FxTable, risk_pc
         stop_dist_eur = fx.to_eur(float(r["close"] - r["initial_stop"]), r["currency"])
         if not (stop_dist_eur > 0):
             continue
-        if profil["bruchstuecke"]:
-            # Es genügt, die Mindestordergröße zu erreichen.
-            noetig.append(profil["min_order_eur"] * 100.0 / max_pct)
-        else:
-            aus_risiko = 3.0 * stop_dist_eur * 100.0 / risk_pct
-            aus_deckel = 3.0 * float(close_eur) * 100.0 / max_pct
-            noetig.append(max(aus_risiko, aus_deckel))
+        noetig.append(sizing.mindestkapital_je_titel(
+            stop_abstand_eur=stop_dist_eur, preis_eur=float(close_eur),
+            risk_pct=risk_pct, profil=profil))
     if not noetig:
         return None
     schwelle = min(noetig)
@@ -413,7 +406,6 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
     max_positions = profil["max_positions"]
     max_sector = profil["max_per_sector"]
     max_open_risk = float(settings.get("risk.max_open_risk_pct", 5.0)) / 100.0 * equity
-    max_value = profil["max_position_pct"] / 100.0 * equity
     limits = settings.get("signal.max_new_entries", {"GREEN": 2, "YELLOW": 1, "RED": 0})
 
     n_open = len(positions)
@@ -455,36 +447,21 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
             skipped.append(_skip(r, "MAX_SEKTOR", max=max_sector))
             continue
         risk_pct = risk_pct_by_region.get(region, float(settings.get("risk.risk_pct", 1.0)))
-        risk_eur = equity * risk_pct / 100.0
-        stop_dist_eur = fx.to_eur(float(r["close"] - r["initial_stop"]), r["currency"])
-        if not (stop_dist_eur > 0):
-            skipped.append(_skip(r, "STOP_UNGUELTIG"))
+        g = sizing.positionsgroesse(equity_eur=equity, risk_pct=risk_pct, close=float(r["close"]),
+                                    initial_stop=float(r["initial_stop"]), currency=r["currency"],
+                                    fx=fx, profil=profil)
+        if not g.moeglich:
+            skipped.append(_skip(r, g.ablehnung, **g.params))
             continue
-        price_eur = fx.to_eur(float(r["close"]), r["currency"])
-        shares = risk_eur / stop_dist_eur
-        deckel = (max_value / price_eur) if price_eur > 0 else 0.0
-        if profil["bruchstuecke"]:
-            # Auf 4 Nachkommastellen, weil Broker Bruchstücke so ausweisen. Untergrenze ist
-            # nicht mehr „eine ganze Aktie“, sondern die kleinste sinnvolle Order.
-            shares = round(min(shares, deckel), 4)
-            if shares * price_eur < profil["min_order_eur"]:
-                skipped.append(_skip(r, "UNTER_MINDESTORDER", preis_eur=price_eur,
-                                     wert_eur=shares * price_eur, min_eur=profil["min_order_eur"]))
-                continue
-        else:
-            shares = math.floor(min(math.floor(shares), math.floor(deckel)))
-            if shares < 1:
-                skipped.append(_skip(r, "ZU_TEUER", preis_eur=price_eur))
-                continue
-        new_risk = shares * stop_dist_eur
-        if open_risk + new_risk > max_open_risk:
+        if open_risk + g.risiko_eur > max_open_risk:
             skipped.append(_skip(r, "GESAMTRISIKO", grenze_eur=max_open_risk))
             continue
+        new_risk = g.risiko_eur
         proposals.append(Proposal(
             symbol=r["symbol"], isin=r["isin"], name=r["name"], region=region, currency=r["currency"],
             sector=r["sector"], close=float(r["close"]), breakout_level=float(r["breakout_level"]),
             initial_stop=float(r["initial_stop"]), atr=float(r["atr"]), rs_rank_pct=float(r["rs_rank_pct"]),
-            shares=float(shares), value_eur=shares * price_eur, risk_eur=new_risk, risk_pct=risk_pct,
+            shares=g.stueck, value_eur=g.wert_eur, risk_eur=new_risk, risk_pct=risk_pct,
             limit_price=float(r["close"]) * 1.01, ampel=regime.LABEL.get(state, "UNBEKANNT"),
         ))
         per_region_left[region] -= 1
@@ -570,28 +547,47 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
 
     # 3. Ampel
     regime_notes: list[str] = []
-    if demo:
-        uptrend, breadth = us_scores or (66.0, 58.0)
-    elif skip_us_scripts:
-        uptrend, breadth = us_scores or (None, None)
+    sma_fast = int(settings.get("signal.sma_fast", 50))
+    sma_slow = int(settings.get("signal.sma_slow", 200))
+    us_quelle = str(settings.get("regime.us.quelle", "breite")).lower()
+    us_extra: dict = {}
+    if us_quelle == "breite":
+        # Marktbreite statt Fremdskripte. Nicht nur, weil die Schwellen jemand anderes
+        # gewählt hat: die Skripte ziehen *aktuelle* CSVs und kennen keinen Stichtag. Damit
+        # ist die Skript-Ampel nicht nachspielbar — und eine Regel, die sich nicht
+        # nachspielen lässt, kann kein Backtest prüfen (Trading-Plan 10.3).
+        us_syms = [c.symbol for c in cons if c.region == "US"]
+        up200, up50, uidx, ucount = regime.marktbreite(frames, us_syms, index_symbols.get("US"),
+                                                       as_of, sma_fast, sma_slow)
+        if demo and uidx is None:
+            uidx = True
+        us_raw = regime.breite_raw_state(up200, up50, uidx, settings.get("regime.us_breite", {}))
+        us_extra = {"p200": up200, "p50": up50, "idx_above": uidx,
+                    "note": f"{ucount} Titel bewertet" + ("" if uidx is not None else "; Index-Proxy fehlt")}
     else:
-        uptrend, breadth, regime_notes = regime.run_us_scores(settings)
-    if uptrend is None:
-        prev = regime.last_known(settings, "US")
-        if prev and prev.get("uptrend"):
-            uptrend = float(prev["uptrend"])
-            breadth = float(prev["breadth"]) if prev.get("breadth") else None
-            regime_notes.append(f"US-Ampel nutzt letzten bekannten Stand vom {prev['date']}")
-    us_raw = regime.us_raw_state(uptrend, breadth, settings.get("regime.us", {}))
+        if demo:
+            uptrend, breadth = us_scores or (66.0, 58.0)
+        elif skip_us_scripts:
+            uptrend, breadth = us_scores or (None, None)
+        else:
+            uptrend, breadth, regime_notes = regime.run_us_scores(settings)
+        if uptrend is None:
+            prev = regime.last_known(settings, "US")
+            if prev and prev.get("uptrend"):
+                uptrend = float(prev["uptrend"])
+                breadth = float(prev["breadth"]) if prev.get("breadth") else None
+                regime_notes.append(f"US-Ampel nutzt letzten bekannten Stand vom {prev['date']}")
+        us_raw = regime.us_raw_state(uptrend, breadth, settings.get("regime.us", {}))
+        us_extra = {"uptrend": uptrend, "breadth": breadth}
+
     eu_syms = [c.symbol for c in cons if c.region == "EU"]
-    p200, p50, idx_above, counted = regime.eu_breadth(frames, eu_syms, index_symbols.get("EU"), as_of,
-                                                      int(settings.get("signal.sma_fast", 50)),
-                                                      int(settings.get("signal.sma_slow", 200)))
+    p200, p50, idx_above, counted = regime.marktbreite(frames, eu_syms, index_symbols.get("EU"), as_of,
+                                                       sma_fast, sma_slow)
     if demo and idx_above is None:
         idx_above = True
-    eu_raw = regime.eu_raw_state(p200, p50, idx_above, settings.get("regime.eu", {}))
+    eu_raw = regime.breite_raw_state(p200, p50, idx_above, settings.get("regime.eu", {}))
     readings = {
-        "US": regime.evaluate_region(settings, "US", as_of, us_raw, {"uptrend": uptrend, "breadth": breadth}),
+        "US": regime.evaluate_region(settings, "US", as_of, us_raw, us_extra),
         "EU": regime.evaluate_region(settings, "EU", as_of, eu_raw,
                                      {"p200": p200, "p50": p50, "idx_above": idx_above,
                                       "note": f"{counted} Titel bewertet" + ("" if idx_above is not None else "; Index-Proxy fehlt")}),
@@ -671,10 +667,12 @@ def _entscheidungs_kontext(settings: Settings, as_of: date, readings: dict[str, 
     soft_weeks = int(settings.get("risk.soft_exit_weeks", 10))
     detail, ampel_note = {}, {}
     for r, rd in readings.items():
-        if r == "US":
-            detail[r] = f"Uptrend {dec.zahl(rd.uptrend, 0)} · Breadth {dec.zahl(rd.breadth, 0)}"
-        else:
+        # Nach der Quelle, nicht nach der Region — die US-Ampel rechnet seit
+        # CHANGELOG_REGELN 2026-09-06 ebenfalls aus Marktbreite.
+        if rd.p200 is not None:
             detail[r] = f"P200 {dec.prozent(rd.p200, 0)} · P50 {dec.prozent(rd.p50, 0)}"
+        else:
+            detail[r] = f"Uptrend {dec.zahl(rd.uptrend, 0)} · Breadth {dec.zahl(rd.breadth, 0)}"
         # Gute Rohwerte bei roter Ampel sehen wie ein Fehler aus. Es ist die Hysterese:
         # die Ampel schaltet erst nach mehreren Lesungen in Folge um.
         if rd.raw != rd.effective:

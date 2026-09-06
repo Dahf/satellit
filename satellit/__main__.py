@@ -18,7 +18,7 @@ from . import decisions as dec
 from . import journal, portfolio, regime, view
 from .api import run_weekly_job, serve_api, write_run_status
 from .config import Settings, load_settings
-from .data import build_source, update_prices
+from .data import NullSource, build_source, update_prices
 from .fx import FxTable, load_fx
 from .notify import send_pushover
 from .pipeline import last_friday, run_weekly
@@ -102,6 +102,59 @@ def cmd_kern_scan(a, s: Settings) -> int:
               f" · {k.jahre_abgedeckt} Jahre Daten{offen}")
     print(f"\n  python -m satellit journal new --symbol <SYMBOL> --core --entry <Kurs> --stop 0")
     return 0
+
+
+def cmd_backtest(a, s: Settings) -> int:
+    """Das Gate aus Trading-Plan 10.3 rechnen und den Bericht schreiben."""
+    from .backtest import Backtest, bericht, kern_etf_referenz
+    from .universe_history import Universumshistorie
+
+    von = date.fromisoformat(a.von)
+    bis = date.fromisoformat(a.bis) if a.bis else last_friday()
+    if von >= bis:
+        print("--von muss vor --bis liegen", file=sys.stderr)
+        return 2
+
+    cons, warn, _ = load_universe(s, offline=a.offline)
+    if not cons:
+        print("Kein Universum geladen — ohne Konstituenten gibt es nichts zu testen.", file=sys.stderr)
+        return 1
+    for w in warn:
+        print(f"  {w}", file=sys.stderr)
+
+    etf = a.etf or (portfolio.lade_plan(s).etf or {}).get("symbol")
+    symbole = sorted({c.symbol for c in cons})
+    index_symbols = {r: (s.get(f"universe.regions.{r}.index_symbol") or "") for r in ("US", "EU")}
+    zusatz = [x for x in list(index_symbols.values()) + [etf] if x]
+    # Wechselkurse als gewöhnliche Kursreihen: nur so lässt sich der Euro-Wert einer
+    # USD-Position zum jeweiligen Stichtag rechnen statt mit dem heutigen Kurs.
+    waehrungen = {c.currency for c in cons if c.currency and c.currency != "EUR"}
+    zusatz += [f"EUR{w}=X" for w in waehrungen]
+
+    print(f"Lade Kurse für {len(symbole) + len(zusatz)} Reihen …", file=sys.stderr)
+    quelle = None if not a.offline else NullSource()
+    frames, fehlt, notes = update_prices(s, symbole + zusatz, {c.symbol: c.price_scale for c in cons},
+                                         source=quelle, today=bis)
+    for n in notes:
+        print(f"  {n}", file=sys.stderr)
+
+    historie = Universumshistorie.laden(cons, s.universe_dir)
+    lauf = Backtest(s, frames, cons, historie, float(a.kapital), index_symbols=index_symbols)
+    erg = lauf.run(von, bis)
+    if etf:
+        erg.benchmark = kern_etf_referenz(s, frames, etf, von, bis, float(a.kapital))
+    else:
+        erg.benchmark = {"fehler": "Kein Kern-ETF-Symbol — ohne Vergleich kein Urteil (10.3). "
+                                   "Mit --etf angeben."}
+
+    text = bericht(erg)
+    s.reports_dir.mkdir(parents=True, exist_ok=True)
+    pfad = s.reports_dir / f"backtest_{bis.isoformat()}.md"
+    pfad.write_text(text, encoding="utf-8")
+    print(text)
+    print(f"--- Bericht gespeichert: {pfad}", file=sys.stderr)
+    # Rückgabewert trägt das Urteil: 0 bestanden, 1 nicht bestanden, 2 nicht bewertbar.
+    return {True: 0, False: 1, None: 2}[erg.besteht()]
 
 
 def cmd_portfolio(a, s: Settings) -> int:
@@ -450,6 +503,17 @@ def build_parser() -> argparse.ArgumentParser:
     ks.add_argument("--max", type=int, default=None, dest="max_titel",
                     help="höchstens N Titel prüfen (zum Ausprobieren)")
     ks.set_defaults(func=cmd_kern_scan)
+
+    bt = sub.add_parser("backtest", help="Das Gate aus TRADING_PLAN.md 10.3: schlägt der Satellit "
+                                         "nach Kosten und Steuern den Kern-ETF?")
+    bt.add_argument("--von", required=True, help="Startdatum (ISO), z. B. 2021-01-01")
+    bt.add_argument("--bis", default=None, help="Enddatum (ISO), Vorgabe: letzter Freitag")
+    bt.add_argument("--kapital", type=float, required=True,
+                    help="Satelliten-Startkapital in EUR")
+    bt.add_argument("--etf", default=None,
+                    help="Vergleichssymbol des Kern-ETF; Vorgabe aus state/portfolio.yaml")
+    bt.add_argument("--offline", action="store_true", help="nur aus dem Kurs-Cache, ohne Netz")
+    bt.set_defaults(func=cmd_backtest)
 
     v = sub.add_parser("view", help="Ansicht (state/view_latest.json) ohne Netz neu bauen")
     v.set_defaults(func=cmd_view)

@@ -25,11 +25,14 @@ _ZEICHEN = {dec.KAUFEN: "🟢", dec.VERKAUFEN: "🔻", dec.STOP_ANHEBEN: "⬆️
 
 
 def ampel_line(r: regime.RegimeReading) -> str:
-    if r.region == "US":
-        detail = f"Uptrend {_f(r.uptrend, 0)} · Breadth {_f(r.breadth, 0)}"
-    else:
+    # Nach der Quelle unterscheiden, nicht nach der Region: seit die US-Ampel aus
+    # Marktbreite gerechnet wird (CHANGELOG_REGELN 2026-09-06), trägt sie dieselben Zahlen
+    # wie die europäische. Eine Fallunterscheidung nach Region zeigte dort zwei Striche.
+    if r.p200 is not None:
         idx = "über" if r.idx_above else ("unter" if r.idx_above is False else "?")
         detail = f"P200 {_pct(r.p200, 0)} · P50 {_pct(r.p50, 0)} · Index {idx} SMA200"
+    else:
+        detail = f"Uptrend {_f(r.uptrend, 0)} · Breadth {_f(r.breadth, 0)}"
     raw = f" (roh: {regime.LABEL.get(r.raw)})" if r.raw != r.effective else ""
     return f"**{r.region}: {r.label}**{raw} — {detail}"
 

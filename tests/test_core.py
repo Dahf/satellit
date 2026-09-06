@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from satellit import decisions as dec  # noqa: E402
+from satellit import sizing  # noqa: E402
 from satellit import indicators as ind  # noqa: E402
 from satellit import journal, regime  # noqa: E402
 from satellit.config import Settings, load_settings, risikoprofil  # noqa: E402
@@ -184,6 +185,26 @@ class TestRegime(unittest.TestCase):
         self.assertAlmostEqual(p200, 0.5)
         self.assertTrue(idx_above)
 
+    def test_marktbreite_ist_regionsneutral(self):
+        """Der alte Name `eu_breadth` behauptete eine Regionsbindung, die es nie gab.
+        Genau deshalb lässt sich damit auch die US-Ampel rechnen — und nur deshalb ist der
+        Backtest möglich (die Skript-Ampel kennt keinen Stichtag)."""
+        self.assertIs(regime.eu_breadth, regime.marktbreite)
+        self.assertIs(regime.eu_raw_state, regime.breite_raw_state)
+
+    def test_us_ampel_aus_marktbreite(self):
+        cfg = {"green_p200": 0.55, "red_p200": 0.40, "red_p50": 0.40}
+        self.assertEqual(regime.breite_raw_state(0.60, 0.55, True, cfg), "GREEN")
+        self.assertEqual(regime.breite_raw_state(0.35, 0.55, True, cfg), "RED")
+        self.assertEqual(regime.breite_raw_state(0.50, 0.55, True, cfg), "YELLOW")
+
+    def test_pipeline_nutzt_standardmaessig_die_marktbreite(self):
+        """Die Skripte dürfen im Normalbetrieb nicht mehr laufen — sie sind der Grund,
+        warum die US-Ampel nicht nachspielbar war."""
+        settings = load_settings(ROOT / "config" / "settings.yaml")
+        self.assertEqual(settings.get("regime.us.quelle"), "breite")
+        self.assertEqual(settings.get("regime.us_breite.green_p200"), 0.55)
+
 
 class TestSelection(unittest.TestCase):
     def test_limits(self):
@@ -217,6 +238,80 @@ class TestSelection(unittest.TestCase):
         props, skipped = select_entries(settings, table, readings, [], acc, FxTable({}, "t"), {"US": 1.0}, blocked=True)
         self.assertEqual(props, [])
         self.assertEqual(skipped[0].code, "KILL_SWITCH")
+
+
+class TestSizing(unittest.TestCase):
+    """Die eine Stelle, an der aus Risiko und Stopabstand eine Stückzahl wird.
+
+    Vorher stand dieselbe Rechnung dreimal im Code (Auswahl, Screener, Mindestkapital). Der
+    Backtest wäre die vierte geworden — und hätte damit ein anderes System geprüft als das,
+    das später Geld bewegt.
+    """
+
+    BRUCH = {"bruchstuecke": True, "max_position_pct": 25, "min_order_eur": 1.0}
+    GANZ = {"bruchstuecke": False, "max_position_pct": 25, "min_order_eur": 1.0}
+
+    def _g(self, profil, *, equity=10_000, risk_pct=1.0, close=100.0, stop=94.0, waehrung="EUR", **kw):
+        return sizing.positionsgroesse(equity_eur=equity, risk_pct=risk_pct, close=close,
+                                       initial_stop=stop, currency=waehrung,
+                                       fx=FxTable({}, "t"), profil=profil, **kw)
+
+    def test_stueckzahl_folgt_risiko_durch_stopabstand(self):
+        g = self._g(self.BRUCH)                      # 100 EUR Risiko / 6 EUR Stopabstand
+        self.assertAlmostEqual(g.stueck, 16.6667, places=4)
+        self.assertAlmostEqual(g.risiko_eur, 100.0, places=2)
+
+    def test_positionsdeckel_begrenzt_die_stueckzahl(self):
+        """25 % von 10.000 € sind 2.500 €, bei 100 € Kurs also 25 Stück — nicht 100."""
+        g = self._g(self.BRUCH, stop=99.0)           # 100 / 1 = 100 Stück ohne Deckel
+        self.assertAlmostEqual(g.stueck, 25.0, places=4)
+        self.assertAlmostEqual(g.wert_eur, 2500.0, places=2)
+        self.assertLess(g.risiko_eur, 100.0)         # der Deckel senkt auch das Risiko
+
+    def test_zu_kleine_order_wird_abgelehnt(self):
+        g = self._g(self.BRUCH | {"min_order_eur": 500.0}, equity=200)
+        self.assertEqual(g.ablehnung, sizing.UNTER_MINDESTORDER)
+        self.assertEqual(g.params["min_eur"], 500.0)
+
+    def test_ungueltiger_stop_wird_abgelehnt(self):
+        g = self._g(self.BRUCH, stop=100.0)
+        self.assertEqual(g.ablehnung, sizing.STOP_UNGUELTIG)
+
+    def test_ganzstueck_rundet_ab_und_lehnt_unter_einem_stueck_ab(self):
+        self.assertEqual(self._g(self.GANZ).stueck, 16.0)
+        self.assertEqual(self._g(self.GANZ, equity=50).ablehnung, sizing.ZU_TEUER)
+
+    def test_preisfilter_gilt_nur_im_ganzstueck_fall(self):
+        """`universe.max_price_pct_of_target` fragt „passt eine ganze Aktie in die
+        Zielposition?" — mit Bruchstücken ist die Frage gegenstandslos."""
+        streng = dict(max_price_pct_of_target=0.40)
+        self.assertEqual(self._g(self.GANZ, equity=250, **streng).ablehnung, sizing.ZU_TEUER)
+        self.assertIsNone(self._g(self.BRUCH, equity=250, **streng).ablehnung)
+
+    def test_zielwert_und_orderwert_fallen_im_ganzstueck_fall_auseinander(self):
+        """Der Zielwert ist eine Screening-Größe, der Orderwert ein Vielfaches des Kurses.
+        Sie getrennt zu halten ist Absicht — siehe Modul-Docstring."""
+        g = self._g(self.GANZ, close=30.0, stop=29.0)   # 100 Stück roh, Deckel 2500/30 = 83
+        self.assertEqual(g.stueck, 83.0)
+        self.assertAlmostEqual(g.wert_eur, 2490.0, places=2)
+        self.assertAlmostEqual(g.zielwert_eur, 2500.0, places=2)
+
+    def test_fremdwaehrung_laeuft_ueber_den_wechselkurs(self):
+        fx = FxTable({"USD": 0.5}, "t")
+        g = sizing.positionsgroesse(equity_eur=10_000, risk_pct=1.0, close=100.0, initial_stop=94.0,
+                                    currency="USD", fx=fx, profil=self.BRUCH)
+        self.assertAlmostEqual(g.preis_eur, 50.0, places=2)
+        self.assertAlmostEqual(g.stop_abstand_eur, 3.0, places=2)
+        self.assertAlmostEqual(g.stueck, 33.3333, places=4)
+
+    def test_ohne_kapital_gibt_es_keine_position(self):
+        self.assertEqual(self._g(self.BRUCH, equity=None).ablehnung, sizing.ZU_TEUER)
+
+    def test_mindestkapital_invertiert_die_bruchstueck_grenze(self):
+        """Bei 1 € Mindestorder und 25 % Deckel braucht es 4 € Satellit."""
+        self.assertAlmostEqual(
+            sizing.mindestkapital_je_titel(stop_abstand_eur=6.0, preis_eur=100.0, risk_pct=1.0,
+                                           profil=self.BRUCH), 4.0, places=2)
 
 
 class TestStaleGate(unittest.TestCase):

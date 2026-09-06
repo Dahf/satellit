@@ -145,16 +145,17 @@ Nach dem Exit: Journal schließen (`close` mit Exit-Grund `stop_hit` / `trend_br
 ## 8. Regime-Ampel
 
 ### 8.1 USA (steuert Einstiege in US-Titel)
-- **Primärsignal:** `uptrend-analyzer` Composite-Score (0–100).
-- **Veto:** `market-breadth-analyzer` Composite-Score.
+Eigener Breadth-Proxy, jede Woche aus den S&P-500-Kursen des Screeners berechnet — dieselbe Rechnung wie in 8.2, nur mit anderen Titeln:
 
 | Ampel | Bedingung |
 |---|---|
-| **Grün** | Uptrend ≥ 60 |
-| **Gelb** | Uptrend 40–59 — *oder* Uptrend ≥ 60 bei Breadth-Veto < 40 (eine Stufe herabgestuft) |
-| **Rot** | Uptrend < 40 |
+| **Grün** | P200 ≥ 55 % **und** Index über SMA200 |
+| **Rot** | P200 < 40 % — *oder* Index unter SMA200 **und** P50 < 40 % |
+| **Gelb** | alles dazwischen |
 
 **Hysterese:** Herabstufung gilt sofort. **Heraufstufung erst, wenn die Bedingung zwei Wochen in Folge erfüllt ist.** (Vorsichtig raus, vorsichtig rein.)
+
+> **Warum nicht mehr die gevendorten Skripte** (Stand 2026-09-06, `docs/CHANGELOG_REGELN.md`): `uptrend-analyzer` und `market-breadth-analyzer` ziehen *aktuelle* CSVs von fremden Servern und kennen keinen Stichtag. Ihre Ampel lässt sich deshalb nicht nachspielen — und eine Regel, die sich nicht nachspielen lässt, kann der Backtest aus 10.3 nicht prüfen. Zweitens: dieser Parameter entscheidet, ob überhaupt gekauft wird, und stammte aus fremdem Code mit fremd gewählten Gewichten. Die Skript-Variante bleibt über `regime.us.quelle: skripte` erreichbar, ist dann aber vom Backtest ausgenommen.
 
 ### 8.2 Europa (steuert Einstiege in EU-Titel)
 Eigener Breadth-Proxy, jede Woche aus den STOXX-600-Kursen des Screeners berechnet:
@@ -203,6 +204,24 @@ Der Satellit stoppt **neue Einstiege** sofort, wenn eine der Bedingungen eintrit
 - **Expectancy ≤ 0** nach **30 abgeschlossenen Trades** (Expectancy = Ø Gewinn × Trefferquote − Ø Verlust × (1 − Trefferquote), in R).
 
 Danach: bestehende Positionen laufen nach Abschnitt 7 aus. Vor einem Neustart: schriftliche Analyse aller Trades, Ursachenhypothese, Regeländerung nach Abschnitt 12, dann Neustart mit 0,5 % Risiko und neuem 20-Trade-Zähler. Der Satellit wird währenddessen **nicht** aus dem Kern aufgefüllt.
+
+### 10.3 Existenzberechtigung des Satelliten (vorab festgelegt, 2026-09-06)
+
+Der Kill-Switch in 10.2 misst gegen die falsche Latte. „Expectancy > 0" heißt nur, dass der Satellit besser ist als **nichts tun**. Er konkurriert aber nicht mit nichts tun, sondern mit der Alternative, dieselben 10 % in den Kern-ETF zu legen. Eine positive Expectancy, die den ETF unterperformt, ist nach 26,375 % Kapitalertragsteuer und dem wöchentlichen Zeitaufwand ein Verlustgeschäft.
+
+**Die Latte.** Bevor echtes Geld in den Satelliten geht, muss ein Backtest zeigen: über den Testzeitraum, **nach Kosten und nach Steuern**, liegt der Satellit vor dem Kern-ETF. Tut er das nicht, wird der Satellit gestrichen und die 10 % gehen in den Kern.
+
+**Was „nach Kosten und nach Steuern" heißt.** Nicht verhandelbar, weil genau diese Posten den Unterschied ausmachen:
+- **1,00 € je Order**, pauschal, Kauf wie Verkauf. Belegt aus 49 eigenen Trade-Republic-Orders (2024-12 bis 2026-05): der Satz ist konstant, unabhängig von der Ordergröße. Sparplan-Ausführungen sind kostenlos — das begünstigt den ETF und ist Teil des Vergleichs, kein Fehler.
+- **Spread/Slippage** als gesetzte Annahme je Seite. Trade Republic weist ihn nirgends strukturiert aus; die Ausführung läuft über Lang & Schwarz, bei US-Titeln oft außerhalb der Heimatbörsenzeiten.
+- **Gap-Fills am Stop.** Füllt der Backtest immer exakt am Stop, ist jedes ausgewiesene R eine Behauptung. Ein Stop-Market füllt bei einer Kurslücke darunter.
+- **Steuern beidseitig:** 26,375 % auf realisierte Gewinne, beim ETF mit 30 % Teilfreistellung, dazu Freistellungsauftrag und Vorabpauschale. Ohne die Teilfreistellung wäre der Vergleich zugunsten des Satelliten verfälscht — sie gilt für den Aktienfonds, nicht für Einzelaktien.
+
+**Was nicht als Bestehen zählt.**
+- Ein Ergebnis, das nur auf dem EU-Teil beruht. Für den STOXX 600 gibt es keine freie Historie der Indexmitgliedschaft; sein Ergebnis wird als Obergrenze ausgewiesen, nicht als Prognose. Für den S&P 500 wird die Mitgliedschaft punkt-in-zeit rekonstruiert.
+- Ein Ergebnis, das erst nach Änderung von Parametern zustande kommt. Gemessen wird gegen die Parameter, die zum Zeitpunkt dieser Festlegung in `config/settings.yaml` stehen. Wer danach schraubt und erneut misst, trifft eine **neue** Entscheidung und braucht einen eigenen Eintrag im Änderungsprotokoll — sonst ist der Backtest keine Evidenz, sondern eine Rechtfertigung.
+
+**Warum das hier und nicht im Code steht.** Eine Latte, die man erst nach dem Ergebnis festlegt, ist keine. Sie wurde eingetragen, bevor eine Zeile des Backtests geschrieben war.
 
 ---
 

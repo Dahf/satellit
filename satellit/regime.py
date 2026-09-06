@@ -125,7 +125,14 @@ def us_raw_state(uptrend: float | None, breadth: float | None, cfg: dict) -> str
     return state
 
 
-def eu_raw_state(p200: float | None, p50: float | None, idx_above: bool | None, cfg: dict) -> str | None:
+def breite_raw_state(p200: float | None, p50: float | None, idx_above: bool | None, cfg: dict) -> str | None:
+    """Ampelzustand aus Marktbreite. **Nicht** europaspezifisch — nur die Schwellen sind es.
+
+    Der alte Name `eu_raw_state` führte in die Irre: die Funktion kennt keine Region, sie
+    bekommt drei Zahlen und ein Schwellenwerk. Genau deshalb lässt sich damit auch die
+    US-Ampel rechnen — und nur deshalb ist der Backtest überhaupt möglich (Trading-Plan
+    8.1: die Skript-Ampel hat keine Historie und keinen Stichtag).
+    """
     if p200 is None or not np.isfinite(p200):
         return None
     if p200 < float(cfg.get("red_p200", 0.40)):
@@ -137,10 +144,11 @@ def eu_raw_state(p200: float | None, p50: float | None, idx_above: bool | None, 
     return "YELLOW"
 
 
-def eu_breadth(frames: dict[str, pd.DataFrame], eu_symbols: list[str], index_symbol: str | None,
-               as_of: date, sma_fast: int = 50, sma_slow: int = 200) -> tuple[float | None, float | None, bool | None, int]:
+def marktbreite(frames: dict[str, pd.DataFrame], symbols: list[str], index_symbol: str | None,
+                as_of: date, sma_fast: int = 50, sma_slow: int = 200) -> tuple[float | None, float | None, bool | None, int]:
+    """Anteil über SMA200 und SMA50 plus Index-Lage. Region ergibt sich aus `symbols`."""
     above200 = above50 = counted = 0
-    for s in eu_symbols:
+    for s in symbols:
         df = frames.get(s)
         if df is None or len(df) < sma_slow:
             continue
@@ -163,6 +171,13 @@ def eu_breadth(frames: dict[str, pd.DataFrame], eu_symbols: list[str], index_sym
         if len(idf) >= sma_slow:
             idx_above = bool(idf["close"].iloc[-1] > ind.sma(idf["close"], sma_slow).iloc[-1])
     return p200, p50, idx_above, counted
+
+
+# Alte Namen. Sie behaupteten eine Regionsbindung, die es nie gab — beide Funktionen
+# rechnen nur mit Zahlen und Schwellen. Bleiben als Aliasse, damit bestehende Aufrufer
+# und Tests unveraendert laufen.
+eu_breadth = marktbreite
+eu_raw_state = breite_raw_state
 
 
 # ------------------------------------------------------------------ hysteresis
