@@ -6,6 +6,7 @@ deshalb vor allem, dass er nicht durchwinkt, was er nicht weiß.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -13,11 +14,14 @@ import unittest
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from satellit import kern_screener as ks  # noqa: E402
-from satellit.config import load_settings  # noqa: E402
+from satellit import kern_scan, kern_screener as ks  # noqa: E402
+from satellit.config import Settings, load_settings  # noqa: E402
+from satellit.data import FetchResult, PriceSource  # noqa: E402
 from satellit.fundamentals import (  # noqa: E402
     Fundamentals, FundamentalsCache, FixtureFundamentals, SyntheticFundamentals,
     von_dict, zu_dict,
@@ -246,6 +250,83 @@ class TestFundamentalsSpeicher(unittest.TestCase):
             res = FixtureFundamentals(tmp).fetch(["DA", "WEG"])
             self.assertIn("DA", res.daten)
             self.assertIn("WEG", res.failed)
+
+
+class NurFxQuelle(PriceSource):
+    """Liefert den EUR/USD-Kurs, sonst nichts.
+
+    Die Titelkurse fehlen absichtlich: der Katalog ist kursunabhängig, und so prüft der
+    Test genau den Weg, der den Kurs braucht — die Umrechnung der Marktkapitalisierung.
+    """
+
+    name = "test"
+
+    def __init__(self, usd_je_eur: float):
+        self.usd_je_eur = usd_je_eur
+        self.abgefragt: list[str] = []
+
+    def fetch(self, symbols: list[str], start: date, end: date | None = None) -> FetchResult:
+        self.abgefragt.extend(symbols)
+        res = FetchResult()
+        for s in symbols:
+            if s == "EURUSD=X":
+                res.frames[s] = pd.DataFrame({"close": [self.usd_je_eur]})
+            else:
+                res.failed[s] = "kein Kurs im Test"
+        return res
+
+
+class TestScanLauf(unittest.TestCase):
+    """Der Lauf selbst, nicht nur der Katalog — hier fiel `load_fx` mit falschen Argumenten auf."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        raw = copy.deepcopy(EINSTELLUNGEN.raw)
+        # Alle Ablagen im Temp-Verzeichnis, nur die mitgelieferten Skills bleiben im Projekt:
+        # das Journal lädt seinen Speicher von dort, und der Scan fragt es nach dem Bestand.
+        raw["paths"]["vendor_skills_dir"] = str(ROOT / EINSTELLUNGEN.get("paths.vendor_skills_dir"))
+        self.settings = Settings(raw=raw, root=Path(self.tmp.name))
+        self.settings.ensure_dirs()
+        kern_scan.speichere_watchlist(
+            self.settings, [{"symbol": "GUT", "name": "Guter Titel", "isin": "", "notiz": ""}])
+        self.fixtures = Path(self.tmp.name) / "fundamentals_fixture"
+        self.fixtures.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fixture(self, **kw) -> FixtureFundamentals:
+        (self.fixtures / "GUT.json").write_text(
+            json.dumps(zu_dict(fundamentals(symbol="GUT", **kw))), encoding="utf-8")
+        return FixtureFundamentals(self.fixtures)
+
+    def test_lauf_rechnet_marktkapitalisierung_mit_geladenem_kurs(self):
+        # 2 USD je EUR ist als Kurs unrealistisch, trennt aber sichtbar vom Notfallwert
+        # (0,86): 10 Mrd. USD sind damit 5,0 Mrd. EUR statt 8,6 Mrd. EUR.
+        quelle = NurFxQuelle(2.0)
+        res = kern_scan.run_kern_scan(
+            self.settings, as_of=date(2026, 9, 4), nur_watchlist=True,
+            source=quelle, fundamentals_source=self._fixture(waehrung="USD", marktkap_eur=10e9))
+        self.assertEqual(res.geprueft, 1)
+        self.assertIn("EURUSD=X", quelle.abgefragt)
+        self.assertIn("5,0 Mrd. EUR", kriterium(res.kandidaten[0], 6).wert)
+
+    def test_lauf_ohne_kursquelle_faellt_auf_naeherung_zurueck(self):
+        """Ohne Netz muss der Scan durchlaufen — mit Näherung statt mit Abbruch."""
+        res = kern_scan.run_kern_scan(
+            self.settings, as_of=date(2026, 9, 4), nur_watchlist=True, offline=True,
+            fundamentals_source=self._fixture(waehrung="USD", marktkap_eur=10e9))
+        self.assertEqual(res.geprueft, 1)
+        self.assertIn("8,6 Mrd. EUR", kriterium(res.kandidaten[0], 6).wert)
+
+    def test_lauf_ohne_fremdwaehrung_holt_keine_kurse(self):
+        quelle = NurFxQuelle(2.0)
+        res = kern_scan.run_kern_scan(
+            self.settings, as_of=date(2026, 9, 4), nur_watchlist=True,
+            source=quelle, fundamentals_source=self._fixture(waehrung="EUR", marktkap_eur=10e9))
+        self.assertEqual(res.geprueft, 1)
+        self.assertNotIn("EURUSD=X", quelle.abgefragt)
+        self.assertIn("10,0 Mrd. EUR", kriterium(res.kandidaten[0], 6).wert)
 
 
 if __name__ == "__main__":

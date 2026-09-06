@@ -221,7 +221,6 @@ def run_kern_scan(settings: Settings, as_of: date | None = None, *, nur_watchlis
         settings, symbole, scales={s: nach_symbol[s]["scale"] for s in symbole},
         source=source, fallback=None, today=as_of)
     res.hinweise.extend(kurs_notes)
-    fx = FxTable({}, "demo") if demo else load_fx(settings, offline=offline)
 
     # 3. Vorfilter — was ohne Netz entscheidbar ist, wird ohne Netz entschieden. Ein
     #    Fundamentaldaten-Abruf je Titel ist teuer; ihn für einen Titel auszugeben, der
@@ -268,6 +267,13 @@ def run_kern_scan(settings: Settings, as_of: date | None = None, *, nur_watchlis
         settings, zu_pruefen, source=fundamentals_source, today=as_of, progress=progress)
     res.hinweise.extend(f_notes)
     res.daten_fehlt = fehlt
+
+    # Wechselkurse erst hier: die Währung eines Titels steht verlässlich erst in den
+    # Fundamentaldaten — im Universum fehlt sie bei Watchlist-Einträgen. Kriterium 6 misst
+    # die Marktkapitalisierung in EUR, da würde eine Notfall-Näherung einen Grenzfall kippen.
+    waehrungen = {m["waehrung"] for m in nach_symbol.values() if m["waehrung"]}
+    waehrungen |= {f.waehrung for f in kennzahlen.values() if f.waehrung}
+    fx = FxTable({}, "demo") if demo else load_fx(source, waehrungen, as_of)
 
     # 5. Prüfen
     im_satelliten = _satelliten_symbole(settings)
