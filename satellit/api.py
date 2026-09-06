@@ -47,6 +47,46 @@ def write_run_status(settings: Settings, **fields) -> None:
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def write_kern_status(settings: Settings, **fields) -> None:
+    """Laufstatus des Kern-Scans — verschachtelt unter `kern` in derselben Datei.
+
+    Eigener Schlüssel statt eigener Datei: das Dashboard liest `run_status.json` ohnehin.
+    Flach geschrieben würden `ok`, `error` und `finished` aber die Felder des Wochenlaufs
+    überschreiben, und die Oberfläche behauptete nach einem Kern-Scan Dinge über den
+    letzten Wochenlauf. Beide teilen sich `_RUN_LOCK` und laufen nie gleichzeitig — ihre
+    Statusfelder dürfen sich trotzdem nicht überschreiben.
+    """
+    p = _status_path(settings)
+    data = {}
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+    vorher = data.get("kern")
+    data["kern"] = {**(vorher if isinstance(vorher, dict) else {}), **fields,
+                    "updated": datetime.now().isoformat(timespec="seconds")}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _demo_modus(settings: Settings) -> bool:
+    """War der letzte Wochenlauf ein Demo-Lauf?
+
+    Der Kern-Scan hat keinen eigenen Schalter, und das Dashboard bietet keinen an. Lief der
+    Rest des Systems auf synthetischen Daten, muss er das auch: sonst prüft er ein echtes
+    Index-Universum, das im Demo-Modus nie heruntergeladen wurde, findet nichts und meldet
+    einen Fehlschlag, den niemand einordnen kann.
+    """
+    p = _status_path(settings)
+    if not p.exists():
+        return False
+    try:
+        return bool(json.loads(p.read_text(encoding="utf-8")).get("demo"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def run_weekly_job(settings: Settings, push: bool = True, as_of: date | None = None, demo: bool = False) -> dict:
     """Wochenlauf mit Statusdatei; wird von CLI, Scheduler und API benutzt."""
     from .pipeline import run_weekly
@@ -337,35 +377,68 @@ def action_kern_watchlist(settings: Settings, body: dict) -> dict:
 def action_kern_scan(settings: Settings, body: dict) -> dict:
     """Kern-Kandidaten prüfen.
 
-    Der volle Universumslauf ruft je Titel Jahresabschlüsse ab und dauert Minuten bis
-    Viertelstunden — deshalb läuft er wie der Wochenlauf im Hintergrund und nicht in der
-    Anfrage. `nur_watchlist=true` prüft nur die eigenen Titel und ist in Sekunden fertig.
+    Der volle Universumslauf ruft je Titel Jahresabschlüsse ab und dauert rund eine Stunde
+    — deshalb läuft er wie der Wochenlauf im Hintergrund und meldet seinen Fortschritt über
+    `run_status.json`. `nur_watchlist=true` prüft nur die eigenen Titel und ist in Sekunden
+    fertig, läuft deshalb direkt in der Anfrage.
     """
     from . import kern_scan as ks_modul
 
     nur_watchlist = bool(body.get("nur_watchlist", False))
+    # Der Modus folgt dem letzten Wochenlauf, lässt sich für die CLI aber überschreiben.
+    demo = bool(body["demo"]) if "demo" in body else _demo_modus(settings)
     if not nur_watchlist:
         if _RUN_LOCK.locked():
             raise ValueError("Es läuft bereits ein Lauf. Bitte abwarten.")
-        threading.Thread(target=_kern_scan_job, args=(settings,), daemon=True).start()
-        return {"gestartet": True, "umfang": "universum"}
-    res = ks_modul.run_kern_scan(settings, nur_watchlist=True)
-    ks_modul.schreibe_stand(settings, res)
+        threading.Thread(target=_kern_scan_job, args=(settings,), kwargs={"demo": demo},
+                         daemon=True).start()
+        return {"gestartet": True, "umfang": "universum", "demo": demo}
+    res = ks_modul.run_kern_scan(settings, nur_watchlist=True, demo=demo)
+    ks_modul.stand_uebernehmen(settings, res)
+    if res.fehler:
+        # Als Ausnahme, nicht als leeres Ergebnis: die Oberfläche zeigt Fehler rot an, ein
+        # „0 geprüft" dagegen als gültiges Prüfergebnis.
+        raise ValueError(res.fehler)
     return {"gestartet": False, "umfang": "watchlist", "geprueft": res.geprueft,
             "bestanden": len(res.bestanden), "trichter": res.trichter}
 
 
-def _kern_scan_job(settings: Settings) -> None:
+def _kern_scan_job(settings: Settings, demo: bool = False) -> None:
+    """Der volle Universumslauf im Hintergrund — mit Fortschritt und sichtbarem Fehlschlag.
+
+    Ohne Statusschreiben waren „läuft noch", „lief ins Leere" und „abgestürzt" für den
+    Nutzer nicht unterscheidbar: die Oberfläche sagte in allen drei Fällen dasselbe.
+    """
     from . import kern_scan as ks_modul
 
+    letzte_meldung = [0.0]
+
+    def fortschritt(fertig: int, gesamt: int) -> None:
+        # Gedrosselt wie beim Wochenlauf — sonst schreibt ein Lauf über 1.100 Titel die
+        # Statusdatei 1.100-mal.
+        jetzt = time.monotonic()
+        if fertig < gesamt and jetzt - letzte_meldung[0] < 5.0:
+            return
+        letzte_meldung[0] = jetzt
+        write_kern_status(settings, fortschritt={"geprueft": fertig, "gesamt": gesamt})
+
     with _RUN_LOCK:
+        write_kern_status(settings, running=True, ok=None, error=None, fortschritt=None,
+                          demo=demo, started=datetime.now().isoformat(timespec="seconds"))
         try:
-            res = ks_modul.run_kern_scan(settings)
-            ks_modul.schreibe_stand(settings, res)
+            res = ks_modul.run_kern_scan(settings, demo=demo, progress=fortschritt)
+            ks_modul.stand_uebernehmen(settings, res)
         except Exception as exc:  # noqa: BLE001
             log.exception("Kern-Scan fehlgeschlagen: %s", exc)
+            write_kern_status(settings, running=False, ok=False, error=f"{exc}",
+                              trace=traceback.format_exc()[-2000:], fortschritt=None,
+                              finished=datetime.now().isoformat(timespec="seconds"))
         else:
             log.info("Kern-Scan fertig: %d geprüft, %d bestanden", res.geprueft, len(res.bestanden))
+            write_kern_status(settings, running=False, ok=not res.fehler, error=res.fehler,
+                              geprueft=res.geprueft, bestanden=len(res.bestanden),
+                              fortschritt=None,
+                              finished=datetime.now().isoformat(timespec="seconds"))
     ansicht_auffrischen(settings)
 
 

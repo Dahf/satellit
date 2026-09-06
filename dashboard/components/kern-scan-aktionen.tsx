@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import type { KernScan } from "@/lib/view";
+import type { KernLauf, KernScan } from "@/lib/view";
 
 /**
  * Die interaktiven Teile des Kern-Abschnitts.
@@ -15,7 +15,7 @@ import type { KernScan } from "@/lib/view";
  * Der Typ-Import oben ist unkritisch — `import type` wird beim Übersetzen entfernt und
  * landet nie im Bundle.
  */
-export function KernScanAktionen({ scan }: { scan: KernScan }) {
+export function KernScanAktionen({ scan, lauf }: { scan: KernScan; lauf?: KernLauf }) {
   const router = useRouter();
   const [laeuft, setLaeuft] = useState<string | null>(null);
   const [meldung, setMeldung] = useState<string | null>(null);
@@ -39,7 +39,9 @@ export function KernScanAktionen({ scan }: { scan: KernScan }) {
         const r = daten.result ?? {};
         setMeldung(
           r.gestartet
-            ? "Der Scan läuft im Hintergrund. Er ruft je Titel Jahresabschlüsse ab und braucht einige Minuten — lad die Seite später neu."
+            ? "Der Scan läuft im Hintergrund. Er ruft je Titel Jahresabschlüsse ab und braucht rund " +
+              "eine Stunde; der Fortschritt steht oben in diesem Abschnitt." +
+              (r.demo ? " Achtung: Demo-Modus — die Kennzahlen sind erfunden." : "")
             : r.geprueft !== undefined
               ? `${r.geprueft} Titel geprüft, ${r.bestanden} bestehen den Katalog.`
               : "Übernommen.",
@@ -55,6 +57,11 @@ export function KernScanAktionen({ scan }: { scan: KernScan }) {
   }
 
   const watchlist = scan.watchlist ?? 0;
+  // Der Hintergrundlauf teilt sich das Schloss mit dem Wochenlauf und schreibt denselben
+  // Kern-Stand. Solange er läuft, sperren beide Knöpfe — sonst schickt ein zweiter Klick
+  // eine Anfrage los, die die API ohnehin ablehnt, und der Watchlist-Lauf schriebe
+  // gleichzeitig in dieselbe Datei.
+  const laeuftImHintergrund = Boolean(lauf?.running);
 
   return (
     <div className="mt-5 rounded-lg border border-border bg-muted/30 p-4">
@@ -80,7 +87,7 @@ export function KernScanAktionen({ scan }: { scan: KernScan }) {
         </button>
         <button
           type="button"
-          disabled={laeuft !== null || watchlist === 0}
+          disabled={laeuft !== null || laeuftImHintergrund || watchlist === 0}
           onClick={() => ruf("kern.scan", { nur_watchlist: true }, "watchlist-scan")}
           className="rounded-md border border-border px-3 py-1.5 text-etikett font-medium transition-colors hover:bg-muted disabled:opacity-40"
           title={watchlist === 0 ? "Noch kein eigener Titel auf der Liste." : `${watchlist} eigene Titel prüfen`}
@@ -92,15 +99,18 @@ export function KernScanAktionen({ scan }: { scan: KernScan }) {
       <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-border pt-3">
         <button
           type="button"
-          disabled={laeuft !== null}
+          disabled={laeuft !== null || laeuftImHintergrund}
           onClick={() => ruf("kern.scan", {}, "voll")}
           className="rounded-md border border-border px-3 py-1.5 text-etikett font-medium transition-colors hover:bg-muted disabled:opacity-40"
         >
-          {laeuft === "voll" ? "Wird gestartet …" : "Ganzes Universum scannen"}
+          {laeuftImHintergrund ? "Läuft …" : laeuft === "voll" ? "Wird gestartet …" : "Ganzes Universum scannen"}
         </button>
         <span className="max-w-[46ch] text-marginalie leading-snug text-muted-foreground">
-          Rund 1.100 Titel, je Titel ein eigener Abruf — das dauert Minuten. Das Ergebnis hält 90
-          Tage, was zum Kauffenster passt.
+          {laeuftImHintergrund && lauf?.fortschritt
+            ? `${lauf.fortschritt.geprueft} von ${lauf.fortschritt.gesamt} Titeln geprüft. Lad die Seite neu, um den Stand zu aktualisieren.`
+            : laeuftImHintergrund
+              ? "Der Lauf hat begonnen und lädt zuerst das Index-Universum."
+              : "Rund 1.100 Titel, je Titel ein eigener Abruf — das dauert etwa eine Stunde. Das Ergebnis hält 90 Tage, was zum Kauffenster passt."}
         </span>
       </div>
 

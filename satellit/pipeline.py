@@ -16,7 +16,9 @@ from . import indicators as ind
 from . import journal, portfolio, regime
 from .config import Settings, risikoprofil
 from .decisions import Decision, Kontext, SkipInfo
-from .data import NullSource, PriceSource, SyntheticSource, build_source, update_prices
+from .data import (
+    NullSource, PriceSource, SyntheticSource, alter_je_symbol, build_source, update_prices,
+)
 from .fx import FxTable, load_fx
 from .screener import ScreenerContext, run_screener
 from .universe import Constituent, load_universe, snapshot_aktualisieren
@@ -102,6 +104,11 @@ class WeeklyResult:
     digest_md: str | None = None
     report_path: str | None = None
     demo: bool = False
+    # Median-Alter der Kursreihen in Tagen, gegen den Stichtag gemessen. Der Median, nicht
+    # das Minimum: ein einzelnes frisches Symbol darf nicht behaupten, der ganze Datenstand
+    # sei aktuell. Die Oberfläche zeigte an dieser Stelle bisher das Alter des *Berichts*
+    # und beschriftete es mit „Kurse".
+    kurs_alter_tage: int | None = None
 
 
 # ---------------------------------------------------------------------- helpers
@@ -371,13 +378,21 @@ def mindestkapital(settings: Settings, table: pd.DataFrame, fx: FxTable, risk_pc
 # ---------------------------------------------------------------------- selection
 def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, regime.RegimeReading],
                    positions: list[PositionView], account: journal.Account, fx: FxTable,
-                   risk_pct_by_region: dict[str, float], blocked: bool) -> tuple[list[Proposal], list[SkipInfo]]:
+                   risk_pct_by_region: dict[str, float], blocked: bool,
+                   kurs_alter: dict[str, int] | None = None) -> tuple[list[Proposal], list[SkipInfo]]:
     """Kandidaten in Vorschläge übersetzen.
 
     Ablehnungen kommen als strukturierte SkipInfo zurück, nicht als fertige Sätze — die
     Formulierung entsteht in decisions.py. Vorher wurden die Sätze hier gebaut und beim
     Schreiben des Berichts wieder weggeworfen, sodass der Nutzer nie erfuhr, warum nichts
     vorgeschlagen wurde.
+
+    `kurs_alter` (Symbol -> Tage) hält das Stale-Gate aus `data.max_stale_age_days`: ein
+    Titel mit veralteter Kursreihe wird nicht vorgeschlagen. Geprüft wird je Titel, nicht
+    für den Lauf als Ganzes — ein einzelnes totes Symbol darf die anderen tausend nicht
+    sperren, und ein veraltetes darf nicht mitlaufen, nur weil der Rest frisch ist. Sein
+    Ausbruch, sein Stop und seine relative Stärke stammen sonst aus einer anderen Woche als
+    das Urteil, das darauf aufbaut.
     """
     proposals: list[Proposal] = []
     skipped: list[SkipInfo] = []
@@ -414,12 +429,20 @@ def select_entries(settings: Settings, table: pd.DataFrame, readings: dict[str, 
                         code=code, params=params,
                         rs_rank_pct=float(r["rs_rank_pct"]) if pd.notna(r["rs_rank_pct"]) else None)
 
+    max_stale = int(settings.get("data.max_stale_age_days", 7))
+
     for _, r in cands.iterrows():
         region = r["region"]
         state = readings[region].effective if region in readings else None
         if r["symbol"] in held:
             # Lief bisher wortlos ins Leere — der Nutzer sah nie, dass der Titel schon liegt.
             skipped.append(_skip(r, "BEREITS_GEHALTEN"))
+            continue
+        alter = (kurs_alter or {}).get(r["symbol"])
+        if alter is not None and alter > max_stale:
+            # Vor allen anderen Grenzen: die übrigen Prüfungen rechnen mit Zahlen aus dieser
+            # Kursreihe. Ist sie alt, ist auch das Ergebnis alt — nur sähe man es ihm nicht an.
+            skipped.append(_skip(r, "DATEN_VERALTET", tage=int(alter), grenze=max_stale))
             continue
         if per_region_left.get(region, 0) <= 0:
             skipped.append(_skip(r, "AMPEL_LIMIT", ampel=state, ampel_label=regime.LABEL.get(state, "UNBEKANNT"),
@@ -599,7 +622,9 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
         open_risk_pct = sum(p.open_risk_eur for p in positions) / account.satellite_equity_eur * 100.0
 
     # 7. Auswahl
-    proposals, skipped = select_entries(settings, table, readings, positions, account, fx, risk_by_region, blocked)
+    kurs_alter = alter_je_symbol(frames, today)
+    proposals, skipped = select_entries(settings, table, readings, positions, account, fx, risk_by_region, blocked,
+                                        kurs_alter=kurs_alter)
 
     # 8. Digest — ein Unterprozess, im Offline-Modus übersprungen
     digest_md = None if offline else journal.run_weekly_digest(settings, as_of)
@@ -624,7 +649,16 @@ def run_weekly(settings: Settings, as_of: date | None = None, source: PriceSourc
         entscheidungen=entscheidungen, abgelehnt=abgelehnt, fx_kurse=dict(fx.rates), kern=kern,
         digest_md=digest_md,
         demo=demo,
+        kurs_alter_tage=_median_alter(kurs_alter),
     )
+
+
+def _median_alter(alter: dict[str, int]) -> int | None:
+    """Median der Kursalter. Robust gegen einzelne tote Symbole in beide Richtungen."""
+    werte = sorted(alter.values())
+    if not werte:
+        return None
+    return int(werte[len(werte) // 2])
 
 
 def _entscheidungs_kontext(settings: Settings, as_of: date, readings: dict[str, regime.RegimeReading],

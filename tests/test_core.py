@@ -17,6 +17,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from satellit import decisions as dec  # noqa: E402
 from satellit import indicators as ind  # noqa: E402
 from satellit import journal, regime  # noqa: E402
 from satellit.config import Settings, load_settings, risikoprofil  # noqa: E402
@@ -216,6 +217,55 @@ class TestSelection(unittest.TestCase):
         props, skipped = select_entries(settings, table, readings, [], acc, FxTable({}, "t"), {"US": 1.0}, blocked=True)
         self.assertEqual(props, [])
         self.assertEqual(skipped[0].code, "KILL_SWITCH")
+
+
+class TestStaleGate(unittest.TestCase):
+    """`data.max_stale_age_days` stand seit jeher in der Konfiguration („ältere Kurse ->
+    keine neuen Kaufvorschläge") und wurde von keiner Zeile Code gelesen. Veraltete Kurse
+    erzeugten damit Kaufvorschläge, denen man ihr Alter nicht ansah."""
+
+    def _tabelle(self, *symbole: str) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"region": "US", "symbol": s, "isin": f"I{s}", "name": f"N{s}", "sector": f"Sek{i}",
+             "currency": "EUR", "close": 100.0, "initial_stop": 94.0, "atr": 2.0,
+             "breakout_level": 99.0, "rs_rank_pct": 0.01, "rs_score": 1.0 - 0.1 * i, "candidate": True}
+            for i, s in enumerate(symbole)
+        ])
+
+    def _auswahl(self, tabelle, kurs_alter):
+        settings = load_settings(ROOT / "config" / "settings.yaml")
+        readings = {"US": regime.RegimeReading("d", "US", "GREEN", "GREEN")}
+        acc = journal.Account(satellite_equity_eur=10_000, high_water_mark=10_000)
+        return select_entries(settings, tabelle, readings, [], acc, FxTable({}, "t"),
+                              {"US": 1.0}, blocked=False, kurs_alter=kurs_alter)
+
+    def test_veralteter_titel_wird_nicht_vorgeschlagen(self):
+        props, skipped = self._auswahl(self._tabelle("ALT"), {"ALT": 30})
+        self.assertEqual(props, [])
+        self.assertEqual(skipped[0].code, "DATEN_VERALTET")
+        self.assertEqual(skipped[0].params["tage"], 30)
+
+    def test_frischer_titel_laeuft_durch(self):
+        props, _ = self._auswahl(self._tabelle("NEU"), {"NEU": 2})
+        self.assertEqual([p.symbol for p in props], ["NEU"])
+
+    def test_ein_totes_symbol_sperrt_die_anderen_nicht(self):
+        """Je Titel geprüft, nicht für den Lauf als Ganzes — sonst legt ein delistetes
+        Symbol im Universum die ganze Woche still."""
+        props, skipped = self._auswahl(self._tabelle("ALT", "NEU"), {"ALT": 400, "NEU": 1})
+        self.assertEqual([p.symbol for p in props], ["NEU"])
+        self.assertEqual([s.code for s in skipped], ["DATEN_VERALTET"])
+
+    def test_ohne_altersangabe_bleibt_alles_beim_alten(self):
+        """Aufrufer ohne `kurs_alter` (Tests, ältere Pfade) dürfen nicht plötzlich sperren."""
+        props, _ = self._auswahl(self._tabelle("EGAL"), None)
+        self.assertEqual([p.symbol for p in props], ["EGAL"])
+
+    def test_ablehnung_wird_in_einem_satz_erklaert(self):
+        _, skipped = self._auswahl(self._tabelle("ALT"), {"ALT": 30})
+        text = dec.SKIP_TEXTE[skipped[0].code](skipped[0])
+        self.assertIn("30 Tage alt", text)
+        self.assertIn("ALT", text)
 
 
 class TestKleineDepots(unittest.TestCase):

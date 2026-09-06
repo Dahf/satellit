@@ -63,17 +63,23 @@ def cmd_weekly(a, s: Settings) -> int:
 
 def cmd_kern_scan(a, s: Settings) -> int:
     """Kandidaten für den Kern-Aktienteil gegen KERN.md 6 prüfen."""
-    from .kern_scan import run_kern_scan, schreibe_stand
+    from .kern_scan import run_kern_scan, stand_uebernehmen
 
     def fortschritt(fertig: int, gesamt: int) -> None:
         print(f"\r  {fertig}/{gesamt} Titel …", end="", file=sys.stderr, flush=True)
 
     res = run_kern_scan(s, nur_watchlist=a.watchlist, demo=a.demo, offline=a.offline,
                         progress=fortschritt, max_titel=a.max_titel)
-    schreibe_stand(s, res)
+    stand_uebernehmen(s, res)
     print(file=sys.stderr)
     for h in res.hinweise:
         print(f"  {h}", file=sys.stderr)
+
+    if res.fehler:
+        # Ein Fehlschlag ist kein leeres Ergebnis — auch der Rückgabewert muss das sagen,
+        # damit ein Cronjob oder ein Skript daran scheitert statt weiterzulaufen.
+        print(f"\nKern-Scan fehlgeschlagen: {res.fehler}", file=sys.stderr)
+        return 1
 
     t = res.trichter
     print(f"\nKern-Scan {res.as_of} ({res.quelle}) — {res.geprueft} geprüft, "

@@ -54,13 +54,19 @@ def _sauber(x: Any) -> Any:
 
 
 def _kursalter(res) -> int | None:
-    """Wie alt sind die jüngsten Kurse? Ab einer Woche werden keine Käufe mehr vorgeschlagen."""
-    juengste = None
-    for p in res.positions:
-        if p.close is not None:
-            juengste = res.as_of
-            break
-    return (date.today() - (juengste or res.as_of)).days
+    """Wie alt sind die Kursreihen? Median über alle Symbole, gegen den Stichtag gemessen.
+
+    Titel, deren Reihe älter als `data.max_stale_age_days` ist, werden in `select_entries`
+    nicht mehr vorgeschlagen — die Ablehnung erscheint mit Grund unter „Warum wurde sonst
+    nichts gekauft?".
+
+    Der Rückfall auf das Alter des Stichtags gilt nur für Läufe ohne Kursreihen; er misst
+    dann das Alter des *Berichts*. Vorher tat die Funktion ausschließlich das — und die
+    Oberfläche beschriftete das Ergebnis trotzdem mit „Kurse".
+    """
+    if res.kurs_alter_tage is not None:
+        return res.kurs_alter_tage
+    return (date.today() - res.as_of).days
 
 
 def bauen(res, settings: Settings) -> dict:
@@ -164,6 +170,9 @@ def kern_scan_kopf(settings: Settings) -> dict:
         "vorgefiltert": stand.get("vorgefiltert", 0),
         "trichter": stand.get("trichter") or {},
         "hinweise": stand.get("hinweise") or [],
+        # Ein gescheiterter Lauf schreibt ebenfalls einen Stand — sonst bliebe die Oberfläche
+        # beim vorletzten stehen und behauptete Erfolg. Der Fehler gehört deshalb mit.
+        "fehler": stand.get("fehler"),
         "demo": bool(stand.get("demo")),
         "watchlist": len(kern_scan.lade_watchlist(settings)),
     }

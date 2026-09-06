@@ -445,6 +445,9 @@ SKIP_TEXTE = {
                                f"steigen. Erst wenn Stops nachgezogen sind, ist wieder Platz."),
     "KILL_SWITCH": lambda s: "Der Kill-Switch ist aktiv — diese Woche keine neuen Einstiege.",
     "KEIN_KAPITAL": lambda s: "Für den Satelliten ist noch kein Kapital hinterlegt, deshalb keine Positionsgrößen.",
+    "DATEN_VERALTET": lambda s: (f"Die Kurse für {s.symbol} sind {s.params.get('tage')} Tage alt, erlaubt sind "
+                                 f"{s.params.get('grenze')}. Ausbruch, Stop und relative Stärke stammen damit aus "
+                                 f"einer anderen Woche als dieser Vorschlag — das wird nicht gekauft."),
 }
 
 

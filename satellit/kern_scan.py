@@ -1,10 +1,16 @@
 """Kern-Aktien suchen: Universum und Watchlist gegen den Kriterienkatalog prüfen.
 
 Bewusst **nicht** Teil des Wochenlaufs. Zwei Gründe: der Katalog braucht je Titel einen
-eigenen Fundamentaldaten-Abruf, was über ein Indexuniversum Minuten bis Viertelstunden
-dauert — und er beantwortet eine Frage, die nur viermal im Jahr gestellt wird, weil Kern-
-Aktien nur in der ersten Handelswoche von Januar, April, Juli und Oktober gekauft werden
-(Trading-Plan 3.4). Der 90-Tage-Cache macht daraus faktisch einen Quartalslauf.
+eigenen Fundamentaldaten-Abruf — fünf Anfragen plus Pause, über rund 1.100 Konstituenten
+also grob eine Stunde und bei Drosselung deutlich mehr — und er beantwortet eine Frage,
+die nur viermal im Jahr gestellt wird, weil Kern-Aktien nur in der ersten Handelswoche von
+Januar, April, Juli und Oktober gekauft werden (Trading-Plan 3.4). Der 90-Tage-Cache macht
+daraus faktisch einen Quartalslauf.
+
+Ein Abbruch mittendrin ist deshalb kein Totalverlust: `update_fundamentals` legt je Titel
+eine JSON ab, sobald sie da ist. Ein zweiter Lauf überspringt alles Zwischengespeicherte
+und setzt dort fort, wo der erste aufgehört hat. Der Fundamentaldaten-Cache *ist* der
+Zwischenstand — ein zusätzlicher wäre leer, weil vor dem Abruf noch kein Titel geprüft ist.
 
 Der Kern kennt keine Ampel (Trading-Plan 2: „Es wird nicht getimt"). In diesem Modul darf
 deshalb nirgends ein Regime-Zustand auftauchen — auch nicht als Sortierkriterium.
@@ -48,6 +54,11 @@ class KernScanResult:
     hinweise: list[str] = field(default_factory=list)
     quelle: str = ""
     demo: bool = False
+    # Ein Fehlschlag, kein Ergebnis — bewusst getrennt von `hinweise`. Ein Hinweis begleitet
+    # ein Ergebnis, ein Fehler ersetzt es. Ohne diese Trennung sehen „nichts geprüft" und
+    # „geprüft, nichts bestanden" in der Oberfläche gleich aus, und die zweite Meldung
+    # („ein gültiges Ergebnis, kein Fehler") wird zur Falschaussage.
+    fehler: str | None = None
 
     @property
     def bestanden(self) -> list[ks.KernKandidat]:
@@ -203,7 +214,10 @@ def run_kern_scan(settings: Settings, as_of: date | None = None, *, nur_watchlis
             "scale": vorhanden.get("scale", 1.0), "waehrung": vorhanden.get("waehrung", ""),
         }
     if not nach_symbol:
-        res.hinweise.append("Keine Titel zu prüfen — Universum leer und Watchlist leer.")
+        res.fehler = ("Die Watchlist ist leer — trag zuerst einen Titel ein." if nur_watchlist else
+                      "Keine Titel zu prüfen: das Index-Universum ließ sich nicht laden und die "
+                      "Watchlist ist leer. Ohne Konstituenten hat der Scan nichts zu tun — "
+                      "prüfe state/universe/ und die iShares-Quellen in config/settings.yaml.")
         res.trichter = ks.trichter([])
         return res
 
@@ -296,6 +310,11 @@ def run_kern_scan(settings: Settings, as_of: date | None = None, *, nur_watchlis
             auf_watchlist=s.upper() in auf_watchlist and s not in watchlist_symbole,
             as_of=as_of))
     res.geprueft = len(res.kandidaten)
+    if zu_pruefen and not res.kandidaten:
+        # Titel waren da, Kennzahlen kamen keine. Das ist ein Quellenproblem (Rate-Limit,
+        # Ausfall von yfinance), kein leeres Prüfergebnis — und muss sich davon unterscheiden.
+        res.fehler = (f"Für keinen der {len(zu_pruefen)} Titel kamen Kennzahlen zurück. "
+                      "Die Fundamentaldaten-Quelle hat nichts geliefert.")
     res.kandidaten = ks.rangfolge(res.kandidaten)
     res.trichter = ks.trichter(res.kandidaten)
     schreibe_csv(res, settings)
@@ -320,6 +339,7 @@ def schreibe_stand(settings: Settings, res: KernScanResult) -> None:
         "vorgefiltert": res.vorgefiltert,
         "trichter": res.trichter,
         "hinweise": res.hinweise,
+        "fehler": res.fehler,
         "demo": res.demo,
         "kandidaten": [asdict(k) for k in res.bestanden],
     }
@@ -338,6 +358,24 @@ def lade_stand(settings: Settings) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("Kern-Stand unlesbar (%s) — wird ignoriert", exc)
         return {}
+
+
+def stand_uebernehmen(settings: Settings, res: KernScanResult) -> bool:
+    """Ergebnis ablegen — außer es ist ein Fehlschlag und es gibt schon einen guten Stand.
+
+    Sonst kostet ein leerer Watchlist-Lauf oder ein Ausfall der Datenquelle die
+    Kandidatenliste des letzten erfolgreichen Universumslaufs: `schreibe_stand` ersetzt die
+    Datei vollständig. Beim allerersten Lauf wird auch ein Fehlschlag abgelegt — sonst hat
+    die Oberfläche gar nichts zu zeigen und behauptet weiter „noch kein Scan gelaufen".
+
+    Der Stand ist damit immer das letzte *gültige* Ergebnis; was der letzte *Lauf* getan
+    hat, steht im Laufstatus (`run_status.json`, Schlüssel `kern`).
+    """
+    if res.fehler and lade_stand(settings):
+        log.warning("Kern-Scan fehlgeschlagen (%s) — vorheriger Stand bleibt erhalten", res.fehler)
+        return False
+    schreibe_stand(settings, res)
+    return True
 
 
 def kandidaten_aus_stand(settings: Settings) -> tuple[list[ks.KernKandidat], dict]:

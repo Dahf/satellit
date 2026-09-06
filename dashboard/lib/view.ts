@@ -139,6 +139,9 @@ export interface KernScan {
   vorgefiltert?: number;
   trichter?: Record<string, number>;
   hinweise?: string[];
+  /** Gesetzt, wenn der Lauf gescheitert ist statt nichts gefunden zu haben. Die beiden
+   *  müssen sich unterscheiden: „nichts geprüft" ist kein gültiges Prüfergebnis. */
+  fehler?: string | null;
   demo?: boolean;
   watchlist: number;
 }
@@ -227,12 +230,32 @@ export function getView(): View | null {
   }
 }
 
+/**
+ * Laufstatus des Kern-Scans — eigener Zweig in derselben Datei.
+ *
+ * Beide Läufe schreiben `run_status.json`; flach nebeneinander würden `ok`, `error` und
+ * `finished` einander überschreiben und die Oberfläche behauptete nach einem Kern-Scan
+ * etwas über den letzten Wochenlauf.
+ */
+export interface KernLauf {
+  running?: boolean;
+  ok?: boolean | null;
+  error?: string | null;
+  started?: string;
+  finished?: string;
+  geprueft?: number;
+  bestanden?: number;
+  demo?: boolean;
+  fortschritt?: { geprueft: number; gesamt: number } | null;
+}
+
 export interface Laufstatus {
   running?: boolean;
   ok?: boolean;
   error?: string | null;
   finished?: string;
   fortschritt?: { geladen: number; gesamt: number } | null;
+  kern?: KernLauf;
 }
 
 export function getLaufstatus(): Laufstatus {

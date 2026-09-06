@@ -19,12 +19,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from satellit import kern_scan, kern_screener as ks  # noqa: E402
+from satellit import api, kern_scan, kern_screener as ks  # noqa: E402
 from satellit.config import Settings, load_settings  # noqa: E402
 from satellit.data import FetchResult, PriceSource  # noqa: E402
 from satellit.fundamentals import (  # noqa: E402
-    Fundamentals, FundamentalsCache, FixtureFundamentals, SyntheticFundamentals,
-    von_dict, zu_dict,
+    Fundamentals, FundamentalsCache, FundamentalsResult, FundamentalsSource,
+    FixtureFundamentals, NullFundamentals, SyntheticFundamentals,
+    update_fundamentals, von_dict, zu_dict,
 )
 
 EINSTELLUNGEN = load_settings(ROOT / "config" / "settings.yaml")
@@ -327,6 +328,138 @@ class TestScanLauf(unittest.TestCase):
         self.assertEqual(res.geprueft, 1)
         self.assertNotIn("EURUSD=X", quelle.abgefragt)
         self.assertIn("10,0 Mrd. EUR", kriterium(res.kandidaten[0], 6).wert)
+
+
+class AbbrechendeQuelle(FundamentalsSource):
+    """Liefert die ersten beiden Titel und bricht dann ab — wie ein Neustart im Lauf."""
+
+    name = "abbruch"
+
+    def fetch(self, symbols: list[str]) -> FundamentalsResult:
+        res = FundamentalsResult()
+        for s in symbols[:2]:
+            f = fundamentals(symbol=s)
+            res.daten[s] = f
+            self._liefere(f)
+        raise RuntimeError("Abbruch mitten im Lauf")
+
+
+class TestFehlschlagIstKeinErgebnis(unittest.TestCase):
+    """„Nichts geprüft" und „geprüft, nichts bestanden" dürfen nicht gleich aussehen.
+
+    Die Oberfläche meldete bei beidem „Kein Titel besteht den Katalog. Das ist ein gültiges
+    Ergebnis, kein Fehler" — im ersten Fall eine Falschaussage.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        raw = copy.deepcopy(EINSTELLUNGEN.raw)
+        raw["paths"]["vendor_skills_dir"] = str(ROOT / EINSTELLUNGEN.get("paths.vendor_skills_dir"))
+        self.settings = Settings(raw=raw, root=Path(self.tmp.name))
+        self.settings.ensure_dirs()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _ergebnis(self, **kw) -> kern_scan.KernScanResult:
+        return kern_scan.run_kern_scan(self.settings, as_of=date(2026, 9, 4), **kw)
+
+    def test_leere_titelmenge_ist_ein_fehler(self):
+        res = self._ergebnis(nur_watchlist=True)          # Watchlist wurde nie befüllt
+        self.assertIsNotNone(res.fehler)
+        self.assertEqual(res.geprueft, 0)
+
+    def test_quelle_ohne_kennzahlen_ist_ein_fehler_kein_leeres_ergebnis(self):
+        kern_scan.speichere_watchlist(self.settings, [{"symbol": "GUT", "name": "", "isin": "", "notiz": ""}])
+        res = self._ergebnis(nur_watchlist=True, offline=True,
+                             fundamentals_source=NullFundamentals())
+        self.assertIsNotNone(res.fehler)
+        self.assertIn("Kennzahlen", res.fehler)
+
+    def test_geglueckter_lauf_setzt_keinen_fehler(self):
+        kern_scan.speichere_watchlist(self.settings, [{"symbol": "GUT", "name": "", "isin": "", "notiz": ""}])
+        fix = Path(self.tmp.name) / "fx"
+        fix.mkdir()
+        (fix / "GUT.json").write_text(json.dumps(zu_dict(fundamentals())), encoding="utf-8")
+        res = self._ergebnis(nur_watchlist=True, offline=True,
+                             fundamentals_source=FixtureFundamentals(fix))
+        self.assertIsNone(res.fehler)
+        self.assertEqual(res.geprueft, 1)
+
+    def test_fehlschlag_ueberschreibt_einen_guten_stand_nicht(self):
+        gut = kern_scan.KernScanResult(as_of=date(2026, 6, 1), geprueft=42, quelle="universum")
+        kern_scan.schreibe_stand(self.settings, gut)
+
+        kaputt = kern_scan.KernScanResult(as_of=date(2026, 9, 4), fehler="Universum leer")
+        self.assertFalse(kern_scan.stand_uebernehmen(self.settings, kaputt))
+        self.assertEqual(kern_scan.lade_stand(self.settings)["geprueft"], 42)
+
+    def test_erster_lauf_legt_auch_einen_fehlschlag_ab(self):
+        """Ohne Vorgänger muss der Fehler sichtbar werden — sonst heißt es weiter
+        „noch kein Scan gelaufen", obwohl einer lief und scheiterte."""
+        kaputt = kern_scan.KernScanResult(as_of=date(2026, 9, 4), fehler="Universum leer")
+        self.assertTrue(kern_scan.stand_uebernehmen(self.settings, kaputt))
+        self.assertEqual(kern_scan.lade_stand(self.settings)["fehler"], "Universum leer")
+
+    def test_abgeschlossene_titel_ueberleben_einen_abbruch(self):
+        """Der teure Teil ist der Netzabruf. Er darf nicht zweimal bezahlt werden."""
+        with self.assertRaises(RuntimeError):
+            update_fundamentals(self.settings, ["A", "B", "C"], source=AbbrechendeQuelle())
+        cache = FundamentalsCache(self.settings.state_dir / "fundamentals")
+        self.assertIsNotNone(cache.load("A"))
+        self.assertIsNotNone(cache.load("B"))
+        self.assertIsNone(cache.load("C"))
+
+
+class TestKernScanLaufstatus(unittest.TestCase):
+    """Der Laufstatus — die Schicht, die „läuft noch" von „gescheitert" unterscheidbar macht."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        raw = copy.deepcopy(EINSTELLUNGEN.raw)
+        raw["paths"]["vendor_skills_dir"] = str(ROOT / EINSTELLUNGEN.get("paths.vendor_skills_dir"))
+        self.settings = Settings(raw=raw, root=Path(self.tmp.name))
+        self.settings.ensure_dirs()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _status(self) -> dict:
+        return json.loads((self.settings.state_dir / "run_status.json").read_text(encoding="utf-8"))
+
+    def test_kern_status_ueberschreibt_den_wochenlauf_nicht(self):
+        """Beide schreiben dieselbe Datei. Flach nebeneinander log der Kern-Scan über den
+        Wochenlauf — die Oberfläche meldete dann dessen Ergebnis falsch."""
+        api.write_run_status(self.settings, ok=True, report="weekly.md", candidates=3)
+        api.write_kern_status(self.settings, ok=False, error="Universum leer")
+
+        st = self._status()
+        self.assertTrue(st["ok"])
+        self.assertEqual(st["report"], "weekly.md")
+        self.assertEqual(st["candidates"], 3)
+        self.assertFalse(st["kern"]["ok"])
+        self.assertEqual(st["kern"]["error"], "Universum leer")
+
+    def test_kern_status_ergaenzt_statt_zu_ersetzen(self):
+        api.write_kern_status(self.settings, running=True, demo=True)
+        api.write_kern_status(self.settings, fortschritt={"geprueft": 7, "gesamt": 12})
+
+        kern = self._status()["kern"]
+        self.assertTrue(kern["running"])
+        self.assertTrue(kern["demo"])
+        self.assertEqual(kern["fortschritt"]["geprueft"], 7)
+
+    def test_demo_modus_folgt_dem_letzten_wochenlauf(self):
+        """Ohne das prüft der Scan ein echtes Universum, das im Demo-Modus nie geladen wurde."""
+        self.assertFalse(api._demo_modus(self.settings))
+        api.write_run_status(self.settings, demo=True)
+        self.assertTrue(api._demo_modus(self.settings))
+
+    def test_watchlist_scan_ohne_titel_meldet_einen_fehler(self):
+        """Als Ausnahme, damit die Oberfläche rot wird — nicht als „0 geprüft"."""
+        with self.assertRaises(ValueError) as ctx:
+            api.action_kern_scan(self.settings, {"nur_watchlist": True})
+        self.assertIn("Watchlist", str(ctx.exception))
 
 
 if __name__ == "__main__":

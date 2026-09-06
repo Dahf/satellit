@@ -59,7 +59,11 @@ export default function Seite() {
       {/* Nur zeigen, wenn der Kern überhaupt Einzelaktien vorsieht — sonst ist der ganze
           Abschnitt eine Antwort auf eine Frage, die sich nicht stellt. */}
       {(v.etf?.anteil_kern ?? 1) < 1 && (
-        <KernKandidaten kandidaten={v.kern_kandidaten ?? []} scan={v.kern_scan ?? { gelaufen: false, watchlist: 0 }} />
+        <KernKandidaten
+          kandidaten={v.kern_kandidaten ?? []}
+          scan={v.kern_scan ?? { gelaufen: false, watchlist: 0 }}
+          lauf={status.kern}
+        />
       )}
 
       <Ausklapp titel="Warum wurde sonst nichts gekauft?" anzahl={v.abgelehnt.length}>
@@ -247,7 +251,33 @@ function Datenlage({ v, status }: { v: View; status: ReturnType<typeof getLaufst
           />
         ))}
         {status.error && <Zeile label="Fehler" wert={status.error} />}
+        {v.daten.bericht && (
+          <div className="flex gap-3">
+            <dt className="w-32 shrink-0 text-marginalie uppercase tracking-wider">Bericht</dt>
+            <dd className="min-w-0 flex-1">
+              <a
+                href="/api/bericht"
+                target="_blank"
+                rel="noreferrer"
+                className="text-foreground underline underline-offset-2 hover:text-kaufen focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                Vollständigen Wochenbericht öffnen
+              </a>
+            </dd>
+          </div>
+        )}
       </dl>
+
+      {/* Hinweise aus dem Lauf — veraltete Kursreihen, ausgefallene Ampel-Quellen. Sie
+          wurden seit jeher befüllt (view.py) und nirgends gelesen; genau die Warnung, die
+          erklärt, warum ein Titel nicht vorgeschlagen wurde, kam nie an. */}
+      {v.daten.hinweise.length > 0 && (
+        <ul className="space-y-1">
+          {v.daten.hinweise.map((h) => (
+            <li key={h}>{h}</li>
+          ))}
+        </ul>
+      )}
 
       {v.daten.universum_warnungen.length > 0 && (
         <ul className="space-y-1">

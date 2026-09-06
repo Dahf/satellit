@@ -64,6 +64,17 @@ def _stale_days(df: pd.DataFrame, today: date) -> int:
     return (today - df.index[-1].date()).days
 
 
+def alter_je_symbol(frames: dict[str, pd.DataFrame], today: date) -> dict[str, int]:
+    """Alter der jüngsten Kurszeile je Symbol in Tagen.
+
+    Grundlage des Stale-Gates: gemessen wird gegen den Stichtag des Laufs, nicht gegen die
+    Uhr — ein Lauf für den letzten Freitag darf am Dienstag nicht als drei Tage veraltet
+    gelten. Ein Symbol ohne Kurse bekommt einen sehr großen Wert und fällt damit sicher
+    durch jede Schwelle, statt als frisch durchzugehen.
+    """
+    return {s: _stale_days(df, today) for s, df in frames.items()}
+
+
 # ------------------------------------------------------------------------- sources
 class PriceSource(ABC):
     name = "abstract"

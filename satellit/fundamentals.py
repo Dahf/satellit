@@ -81,6 +81,11 @@ class FundamentalsResult:
 class FundamentalsSource(ABC):
     name = "abstract"
     progress: Callable[[int, int], None] | None = None         # (fertig, gesamt)
+    # Wird je fertigem Titel gerufen, damit der Aufrufer sofort ablegen kann statt erst,
+    # wenn `fetch` komplett zurückkehrt. Ein Universumslauf dauert rund eine Stunde; ohne
+    # diesen Haken verwarf jeder Abbruch dazwischen — Neustart des Containers, Timeout,
+    # Ausnahme im letzten Titel — sämtliche bereits geholten Abschlüsse.
+    on_result: Callable[[Fundamentals], None] | None = None
 
     def _melde(self, fertig: int, gesamt: int) -> None:
         if self.progress:
@@ -88,6 +93,15 @@ class FundamentalsSource(ABC):
                 self.progress(fertig, gesamt)
             except Exception:  # noqa: BLE001  # pragma: no cover
                 pass
+
+    def _liefere(self, f: Fundamentals) -> None:
+        """Einen fertigen Datensatz durchreichen. Ein Fehler hier darf den Lauf nie kippen —
+        er kostet einen Cache-Eintrag, nicht die Stunde Arbeit dahinter."""
+        if self.on_result:
+            try:
+                self.on_result(f)
+            except Exception as exc:  # noqa: BLE001  # pragma: no cover
+                log.warning("Zwischenspeichern von %s fehlgeschlagen: %s", f.symbol, exc)
 
     @abstractmethod
     def fetch(self, symbols: list[str]) -> FundamentalsResult:
@@ -143,8 +157,10 @@ def _erste(info: dict, *namen: str) -> float | None:
 # --------------------------------------------------------------------------- Quellen
 class YFinanceFundamentals(FundamentalsSource):
     """Primärquelle. Dieselbe inoffizielle Schnittstelle wie die Kurse, aber je Titel ein
-    eigener Abruf — es gibt keinen Batch-Endpunkt für Abschlüsse. Ein Lauf über ein volles
-    Indexuniversum dauert deshalb Minuten bis Viertelstunden; darum der lange Cache.
+    eigener Abruf — fünf Anfragen (`info`, Bilanz, GuV, Cashflow, Dividenden) plus Pause,
+    es gibt keinen Batch-Endpunkt für Abschlüsse. Ein Lauf über ein volles Indexuniversum
+    dauert deshalb rund eine Stunde und bei gedrosselter Quelle ein Vielfaches davon
+    (jeder Fehlversuch wartet 30, dann 60 Sekunden); darum der lange Cache und `on_result`.
     """
 
     name = "yfinance"
@@ -180,6 +196,7 @@ class YFinanceFundamentals(FundamentalsSource):
             if f is not None:
                 if f.vollstaendig:
                     res.daten[symbol] = f
+                    self._liefere(f)
                 else:
                     # Ein leerer Datensatz ist kein Datensatz. Würde er im Cache landen,
                     # gälte der Titel 90 Tage lang als geprüft und durchgefallen.
@@ -451,6 +468,16 @@ def update_fundamentals(settings, symbols: list[str], source: FundamentalsSource
         src = source or build_source(settings)
         if progress:
             src.progress = progress
+
+        def sofort_ablegen(f: Fundamentals) -> None:
+            f.abgerufen_am = f.abgerufen_am or heute.isoformat()
+            cache.save(f)
+
+        # Quellen mit langem Lauf legen über diesen Haken jeden Titel sofort ab. Die
+        # Schleife unten speichert trotzdem noch einmal: Quellen ohne eigene Schleife
+        # (synthetisch, offline) rufen den Haken nicht, und derselbe Datensatz zweimal zu
+        # schreiben kostet nichts gegen die Stunde Netzverkehr, die er ersetzt.
+        src.on_result = sofort_ablegen
         log.info("Fundamentaldaten: %d von %d Titeln werden geladen (%s)", len(holen), len(symbols), src.name)
         res = src.fetch(holen)
         notes.extend(res.notes)
